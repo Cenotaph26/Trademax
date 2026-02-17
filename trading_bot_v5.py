@@ -439,7 +439,8 @@ class Engine:
                         d=self.agent.decide(s)
                         if d:
                             self.agent.open(d)
-                            self.log(f"{s} {d['action']} @${d['price']:.4f} | {d['lev']}x | Guven:{d['conf']:.0f}% | {', '.join(d['reasons'][:2])}","trade")
+                            sz=self.agent.positions[s]['sz']
+                            self.log(f"{s} {d['action']} | ${sz:.0f} pozisyon | {d['lev']}x | @${d['price']:.4f} | AI:{d['conf']:.0f}%","trade")
                 self.tick+=1; time.sleep(2)
             except Exception as e: self.log(f"Hata: {e}","error"); time.sleep(2)
 
@@ -1090,7 +1091,10 @@ function showPnlChart(){
 }
 function setPriceMode(){document.getElementById('mb-pr').classList.add('active');document.getElementById('mb-pnl').classList.remove('active')}
 function showCandleChart(sym){
-  chartMode='candle';curSym=sym;
+  chartMode='candle';curSym=sym;curTf='5m'; // Reset to 5m
+  document.querySelectorAll('.tf-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelector('.tf-btn[onclick*="1m"]')?.classList.add('active');
+  
   const pos=(D.positions||{})[sym];const c=(D.coins||{})[sym]||{};
   document.getElementById('ch-title').textContent=sym.replace('USDT','')+'/USDT';
   document.getElementById('ch-badge').textContent=pos?pos.type+' '+pos.lev+'x':'CHART';
@@ -1102,16 +1106,42 @@ function showCandleChart(sym){
   document.getElementById('ch-info').innerHTML=`<span>Fiyat: <b style="color:var(--cyan)">$${fp(c.price)}</b></span><span>24s: <b class="${cl(c.change)}">${fpct(c.change||0)}</b></span><span>Vol: <b>${vol}M USDT</b></span>${pos?`<span>PnL: <b class="${cl(pos.pnl)}">${fpp(pos.pnl)}</b></span>`:''}`;
 }
 // Auto-refresh chart if modal is open
-function refreshOpenChart(){
+async function refreshOpenChart(){
   if(chartMode==='candle'&&curSym){
     const pos=(D.positions||{})[curSym];
-    const kl=pos?pos.klines:[];
-    if(kl&&kl.length>0){
-      drawCandles(kl,pos?.entry,pos?.tp,pos?.sl,pos?.type,'cv',210);
+    
+    // If position exists, use its klines (always 5m for positions)
+    if(pos&&pos.klines&&pos.klines.length>0&&curTf==='5m'){
+      drawCandles(pos.klines,pos?.entry,pos?.tp,pos?.sl,pos?.type,'cv',210);
+      return;
     }
+    
+    // Otherwise fetch klines for current timeframe
+    try{
+      const r=await fetch(`/api/klines?sym=${curSym}&tf=${curTf}&limit=80`);
+      const data=await r.json();
+      if(data.klines&&data.klines.length>0){
+        drawCandles(data.klines,pos?.entry,pos?.tp,pos?.sl,pos?.type,'cv',210);
+      }
+    }catch(e){console.error('Chart refresh error:',e);}
   }
 }
-function setTf(tf,btn){curTf=tf;document.querySelectorAll('.tf-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');if(curSym)showCandleChart(curSym)}
+async function setTf(tf,btn){
+  curTf=tf;
+  document.querySelectorAll('.tf-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  if(!curSym)return;
+  
+  // Fetch klines for new timeframe
+  try{
+    const r=await fetch(`/api/klines?sym=${curSym}&tf=${tf}&limit=80`);
+    const data=await r.json();
+    if(data.klines&&data.klines.length>0){
+      const pos=(D.positions||{})[curSym];
+      drawCandles(data.klines,pos?.entry,pos?.tp,pos?.sl,pos?.type,'cv',210);
+    }
+  }catch(e){console.error('Timeframe change error:',e);}
+}
 
 function buildPositions(){
   const pos=D.positions||{};const keys=Object.keys(pos);
@@ -1128,10 +1158,22 @@ function buildPositions(){
     h+=`<div class="pc pc-${isL?'long':'short'}">
       <div class="pc-top">
         <div><div class="pc-sym">${sym.replace('USDT','')}<span style="font-size:11px;color:var(--dim)">/USDT</span></div>
-          <div class="pc-tags"><span class="pc-type ${isL?'lt':'st'}">${p.type}</span><span class="lev-t">${p.lev}x</span><span class="conf-t">AI ${(p.conf||0).toFixed(0)}%</span><span style="font-size:8px;color:var(--dimmer);margin-left:2px">${dur}</span></div></div>
+          <div class="pc-tags">
+            <span class="pc-type ${isL?'lt':'st'}">${p.type}</span>
+            <span class="lev-t">${p.lev}x</span>
+            <span class="conf-t">AI ${(p.conf||0).toFixed(0)}%</span>
+            <span class="ind-c" style="background:rgba(0,229,255,0.15);color:var(--cyan);font-size:9px;padding:3px 6px">$${(p.sz||0).toFixed(0)}</span>
+            <span style="font-size:8px;color:var(--dimmer);margin-left:2px">${dur}</span>
+          </div></div>
         <div class="pc-pnl-wrap"><div class="pc-pnl-main ${cl(p.pnl)}">${fpp(p.pnl)}</div><div class="pc-pnl-pct">${fpct(p.pnl_pct||0)}</div><div class="pc-extr">Max:${fpp(p.max_pnl)} Min:${fpp(p.min_pnl)}</div></div>
       </div>
-      <div class="pc-prices"><span>Giris <b>$${fp(p.entry)}</b></span><span>Anlik <b>$${fp(p.cur)}</b></span><span>TP <b style="color:var(--green)">$${fp(p.tp)}</b></span><span>SL <b style="color:var(--red)">$${fp(p.sl)}</b></span></div>
+      <div class="pc-prices">
+        <span>Pozisyon <b style="color:var(--cyan)">$${(p.sz||0).toFixed(2)}</b></span>
+        <span>Giris <b>$${fp(p.entry)}</b></span>
+        <span>Anlik <b>$${fp(p.cur)}</b></span>
+        <span>TP <b style="color:var(--green)">$${fp(p.tp)}</b></span>
+        <span>SL <b style="color:var(--red)">$${fp(p.sl)}</b></span>
+      </div>
       <div class="prog-wrap">
         <div class="prog-lbl"><span style="color:var(--red)">SL</span><span style="color:var(--dim)">${prog.toFixed(0)}%</span><span style="color:var(--green)">TP</span></div>
         <div class="prog-bg"><div class="prog-fill" style="width:${prog}%;background:${progC}"></div><div class="prog-mk" style="left:${prog}%"></div></div>
@@ -1159,7 +1201,7 @@ function buildHistory(){
   document.getElementById('hist-badge').textContent=total+' TRADE';document.getElementById('hist-stats').textContent=`W:${wins} | L:${losses} | ${hist.length} gosterilen`;
   if(!hist.length){document.getElementById('history').innerHTML='<div class="empty">Trade bekleniyor...</div>';return;}
   let h='';
-  hist.forEach(t=>{h+=`<div class="hi"><div class="hi-b ${t.won?'wb':'lb'}">${t.won?'WIN':'LOSS'}</div><div class="hi-info"><div class="hi-sym">${t.sym.replace('USDT','')} ${t.type} ${t.lev}x</div><div class="hi-meta">${t.why} · ${t.ht} · ${t.strat} · ${t.time}</div></div><div><div class="hi-pnl ${t.won?'c-green':'c-red'}">${fpp(t.pnl)}</div><span class="hi-pct">${fpct(t.pnl_pct||0)}</span></div></div>`;});
+  hist.forEach(t=>{h+=`<div class="hi"><div class="hi-b ${t.won?'wb':'lb'}">${t.won?'WIN':'LOSS'}</div><div class="hi-info"><div class="hi-sym">${t.sym.replace('USDT','')} ${t.type} ${t.lev}x · <span style="color:var(--cyan)">$${(t.sz||0).toFixed(0)}</span></div><div class="hi-meta">${t.why} · ${t.ht} · ${t.strat} · ${t.time}</div></div><div><div class="hi-pnl ${t.won?'c-green':'c-red'}">${fpp(t.pnl)}</div><span class="hi-pct">${fpct(t.pnl_pct||0)}</span></div></div>`;});
   document.getElementById('history').innerHTML=h;
 }
 
