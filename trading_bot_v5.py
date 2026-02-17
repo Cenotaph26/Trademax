@@ -50,20 +50,30 @@ class BinanceClient:
     def _fetch_tickers(self):
         try:
             r=requests.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=10)
-            for t in r.json():
-                s=t['symbol']
-                if s in self.symbols:
+            data=r.json()
+            if not isinstance(data, list):
+                print(f"ticker error: unexpected response type")
+                return
+            for t in data:
+                if not isinstance(t, dict):
+                    continue
+                s=t.get('symbol')
+                if not s or s not in self.symbols:
+                    continue
+                try:
                     self.ticker[s]={
-                        'price':float(t['lastPrice']),
-                        'change':float(t['priceChangePercent']),
-                        'volume':float(t['volume']),
-                        'high':float(t['highPrice']),
-                        'low':float(t['lowPrice']),
-                        'quoteVolume':float(t['quoteVolume']),
-                        'openPrice':float(t['openPrice']),
+                        'price':float(t.get('lastPrice',0)),
+                        'change':float(t.get('priceChangePercent',0)),
+                        'volume':float(t.get('volume',0)),
+                        'high':float(t.get('highPrice',0)),
+                        'low':float(t.get('lowPrice',0)),
+                        'quoteVolume':float(t.get('quoteVolume',0)),
+                        'openPrice':float(t.get('openPrice',0)),
                         'count':int(t.get('count',0)),
                     }
-                    self.prices[s]=float(t['lastPrice'])
+                    self.prices[s]=float(t.get('lastPrice',0))
+                except (ValueError, TypeError) as e:
+                    continue
             print(f"ok {len(self.ticker)} prices loaded")
         except Exception as e: print(f"ticker error: {e}")
 
@@ -81,18 +91,27 @@ class BinanceClient:
     def refresh_tickers(self):
         try:
             r=requests.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=10)
-            for t in r.json():
-                s=t['symbol']
-                if s in self.symbols and s in self.ticker:
+            data=r.json()
+            if not isinstance(data, list):
+                return
+            for t in data:
+                if not isinstance(t, dict):
+                    continue
+                s=t.get('symbol')
+                if not s or s not in self.symbols or s not in self.ticker:
+                    continue
+                try:
                     self.ticker[s].update({
-                        'price':float(t['lastPrice']),
-                        'change':float(t['priceChangePercent']),
-                        'volume':float(t['volume']),
-                        'high':float(t['highPrice']),
-                        'low':float(t['lowPrice']),
-                        'quoteVolume':float(t['quoteVolume']),
+                        'price':float(t.get('lastPrice',0)),
+                        'change':float(t.get('priceChangePercent',0)),
+                        'volume':float(t.get('volume',0)),
+                        'high':float(t.get('highPrice',0)),
+                        'low':float(t.get('lowPrice',0)),
+                        'quoteVolume':float(t.get('quoteVolume',0)),
                     })
-                    self.prices[s]=float(t['lastPrice'])
+                    self.prices[s]=float(t.get('lastPrice',0))
+                except (ValueError, TypeError):
+                    continue
         except: pass
 
     def klines(self, symbol, interval='5m', limit=80):
