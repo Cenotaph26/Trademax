@@ -15,25 +15,6 @@ class BinanceClient:
         self._fetch_symbols(); self._fetch_tickers()
 
     def _fetch_symbols(self):
-        PRIORITY=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
-            'ADAUSDT','DOGEUSDT','DOTUSDT','MATICUSDT','AVAXUSDT',
-            'LINKUSDT','UNIUSDT','LTCUSDT','BCHUSDT','ATOMUSDT',
-            'ETCUSDT','APTUSDT','ARBUSDT','OPUSDT','NEARUSDT',
-            'ICPUSDT','VETUSDT','INJUSDT','STXUSDT','THETAUSDT',
-            'ALGOUSDT','FTMUSDT','SANDUSDT','MANAUSDT','AXSUSDT',
-            'GALAUSDT','CHZUSDT','SUSHIUSDT','AAVEUSDT','COMPUSDT',
-            'GRTUSDT','CRVUSDT','RUNEUSDT','SNXUSDT','1INCHUSDT',
-            'FILUSDT','ROSEUSDT','ENJUSDT','BATUSDT','BALUSDT',
-            'MKRUSDT','YFIUSDT','KSMUSDT','KNCUSDT','BANDUSDT',
-            'SUIUSDT','SXPUSDT','ZILUSDT','QNTUSDT','EGLDUSDT',
-            'FLOWUSDT','HBARUSDT','XLMUSDT','XTZUSDT','EOSUSDT',
-            'TRXUSDT','DASHUSDT','ONTUSDT','CELOUSDT','LRCUSDT',
-            'OCEANUSDT','STORJUSDT','RENUSDT','SKLUSDT','FETUSDT',
-            'AGLDUSDT','ARPAUSDT','BLURUSDT','CFXUSDT','CYBERUSDT',
-            'GMTUSDT','HOOKUSDT','MAGICUSDT','MAVUSDT','MDTUSDT',
-            'MINAUSDT','NMRUSDT','PERPUSDT','PYTHUSDT','RDNTUSDT',
-            'SEIUSDT','STGUSDT','TIAUSDT','TRUUSDT','UMAUSDT',
-            'WLDUSDT','XAIUSDT','YGGUSDT','ZRXUSDT']
         try:
             r=requests.get(f"{self.BASE}/fapi/v1/exchangeInfo",timeout=10)
             data=r.json()
@@ -45,13 +26,12 @@ class BinanceClient:
                    if isinstance(s,dict) and s.get('symbol','').endswith('USDT')
                    and s.get('contractType')=='PERPETUAL'
                    and s.get('status')=='TRADING'}
-            self.symbols=[s for s in PRIORITY if s in valid]
-            rest=[s for s in valid if s not in self.symbols]
-            self.symbols+=sorted(rest)[:15]
-            print(f"ok {len(self.symbols)} pairs loaded")
+            # TÜM USDT çiftlerini al (alfabetik sıralı)
+            self.symbols=sorted(list(valid))
+            print(f"ok {len(self.symbols)} pairs loaded (ALL FUTURES)")
         except Exception as e:
             print(f"symbols error: {e}")
-            self.symbols=PRIORITY[:15]
+            self.symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT']
 
     def _fetch_tickers(self):
         if not self.symbols:
