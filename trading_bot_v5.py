@@ -16,8 +16,11 @@ class BinanceClient:
 
     def _fetch_symbols(self):
         try:
-            r=requests.get(f"{self.BASE}/fapi/v1/exchangeInfo",timeout=10)
+            r=requests.get(f"{self.BASE}/fapi/v1/exchangeInfo",timeout=15)
             data=r.json()
+            print(f"DEBUG symbols API status: {r.status_code}, type: {type(data)}")
+            if isinstance(data,dict) and 'code' in data:
+                print(f"DEBUG API error: {data.get('msg','unknown')}")
             if not isinstance(data,dict) or 'symbols' not in data:
                 print(f"symbols error: invalid API response")
                 self.symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT']
@@ -38,8 +41,11 @@ class BinanceClient:
             print("ticker error: no symbols loaded")
             return
         try:
-            r=requests.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=10)
+            r=requests.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=15)
             data=r.json()
+            print(f"DEBUG ticker API status: {r.status_code}, type: {type(data)}")
+            if isinstance(data,dict) and 'code' in data:
+                print(f"DEBUG API error: {data.get('msg','unknown')}")
             if not isinstance(data, list):
                 print(f"ticker error: unexpected response type - {type(data)}")
                 # Fallback: simulated data for development
