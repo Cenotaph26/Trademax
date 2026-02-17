@@ -119,14 +119,6 @@ class BinanceClient:
                     if t['symbol'] in self.ticker:
                         self.ticker[t['symbol']]['price']=p
         except: pass
-            r=requests.get(f"{self.BASE}/fapi/v1/ticker/price",timeout=5)
-            for t in r.json():
-                if t['symbol'] in self.symbols:
-                    p=float(t['price'])
-                    self.prices[t['symbol']]=p
-                    if t['symbol'] in self.ticker:
-                        self.ticker[t['symbol']]['price']=p
-        except: pass
 
     def refresh_tickers(self):
         try:
