@@ -20,7 +20,7 @@ class BinanceClient:
             data=r.json()
             if not isinstance(data,dict) or 'symbols' not in data:
                 print(f"symbols error: invalid API response")
-                self.symbols=PRIORITY[:15]
+                self.symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT']
                 return
             valid={s['symbol'] for s in data['symbols']
                    if isinstance(s,dict) and s.get('symbol','').endswith('USDT')
