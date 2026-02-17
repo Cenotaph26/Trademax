@@ -145,7 +145,7 @@ class BinanceClient:
     def klines(self, symbol, interval='5m', limit=80):
         cache_key=f"{symbol}_{interval}"
         now=time.time()
-        if cache_key in self._klines_cache and now-self._cache_ts.get(cache_key,0)<20:
+        if cache_key in self._klines_cache and now-self._cache_ts.get(cache_key,0)<10:
             return self._klines_cache[cache_key]
         try:
             r=self.session.get(f"{self.BASE}/fapi/v1/klines",
@@ -346,6 +346,10 @@ class Agent:
                 pnl=pos['sz']*pct/100
                 pos['pnl']=pnl; pos['pnl_pct']=pct
                 pos['max_pnl']=max(pos['max_pnl'],pnl); pos['min_pnl']=min(pos['min_pnl'],pnl)
+                # Her tick'te klines güncelle (cache bypass için clear)
+                cache_key=f"{sym}_5m"
+                if cache_key in self.bc._klines_cache:
+                    self.bc._cache_ts[cache_key]=0  # Force refresh
                 new_kl=self.bc.klines(sym,'5m',50)
                 if new_kl: pos['klines']=new_kl
                 if pos['type']=='LONG':
@@ -1081,6 +1085,16 @@ function showCandleChart(sym){
   const vol=((c.quoteVolume||0)/1e6).toFixed(1);
   document.getElementById('ch-info').innerHTML=`<span>Fiyat: <b style="color:var(--cyan)">$${fp(c.price)}</b></span><span>24s: <b class="${cl(c.change)}">${fpct(c.change||0)}</b></span><span>Vol: <b>${vol}M USDT</b></span>${pos?`<span>PnL: <b class="${cl(pos.pnl)}">${fpp(pos.pnl)}</b></span>`:''}`;
 }
+// Auto-refresh chart if modal is open
+function refreshOpenChart(){
+  if(chartMode==='candle'&&curSym){
+    const pos=(D.positions||{})[curSym];
+    const kl=pos?pos.klines:[];
+    if(kl&&kl.length>0){
+      drawCandles(kl,pos?.entry,pos?.tp,pos?.sl,pos?.type,'cv',210);
+    }
+  }
+}
 function setTf(tf,btn){curTf=tf;document.querySelectorAll('.tf-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');if(curSym)showCandleChart(curSym)}
 
 function buildPositions(){
@@ -1218,11 +1232,11 @@ async function poll(){
     if(firstPoll){buildTicker();loadRisk(D.risk);firstPoll=false;}else updateTicker();
     renderCoins();buildPositions();buildHistory();buildStrategies();buildLog();
     if(chartMode==='pnl')drawPnlChart(D.curve||[]);
-    else if(chartMode==='candle'&&curSym)showCandleChart(curSym);
+    else if(chartMode==='candle')refreshOpenChart();
   }catch(e){console.warn(e)}
 }
 
-initHover();poll();setInterval(poll,3000);
+initHover();poll();setInterval(poll,2000);
 window.addEventListener('resize',()=>{if(chartMode==='pnl')drawPnlChart(D.curve||[]);else if(chartMode==='candle'&&curSym)showCandleChart(curSym)});
 </script>
 </body>
