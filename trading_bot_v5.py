@@ -12,40 +12,72 @@ class BinanceClient:
     def __init__(self):
         self.symbols=[]; self.ticker={}; self.prices={}
         self._klines_cache={}; self._cache_ts={}
+        self.session = requests.Session()
+        # Proxy kullan (geo-block bypass)
+        self.proxies = None  # Railway'de proxy gerekirse buraya ekleriz
         self._fetch_symbols(); self._fetch_tickers()
 
     def _fetch_symbols(self):
         try:
-            r=requests.get(f"{self.BASE}/fapi/v1/exchangeInfo",timeout=15)
+            # Try main endpoint first
+            r=self.session.get(f"{self.BASE}/fapi/v1/exchangeInfo",timeout=15,proxies=self.proxies)
+            
+            # If geo-blocked, try alternative public endpoint
+            if r.status_code==451:
+                print("Main API geo-blocked, trying alternative...")
+                r=self.session.get("https://fapi.binance.com/fapi/v1/exchangeInfo",timeout=15)
+            
             data=r.json()
-            print(f"DEBUG symbols API status: {r.status_code}, type: {type(data)}")
-            if isinstance(data,dict) and 'code' in data:
-                print(f"DEBUG API error: {data.get('msg','unknown')}")
+            
             if not isinstance(data,dict) or 'symbols' not in data:
-                print(f"symbols error: invalid API response")
-                self.symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT']
+                print(f"symbols error: invalid response - using fallback minimal list")
+                self.symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','MATICUSDT','AVAXUSDT','LINKUSDT']
                 return
-            valid={s['symbol'] for s in data['symbols']
+            
+            # Get ALL USDT perpetual futures
+            valid=[s['symbol'] for s in data['symbols']
                    if isinstance(s,dict) and s.get('symbol','').endswith('USDT')
                    and s.get('contractType')=='PERPETUAL'
-                   and s.get('status')=='TRADING'}
-            # TÜM USDT çiftlerini al (alfabetik sıralı)
-            self.symbols=sorted(list(valid))
-            print(f"ok {len(self.symbols)} pairs loaded (ALL FUTURES)")
+                   and s.get('status')=='TRADING']
+            
+            self.symbols=sorted(valid)
+            print(f"✓ {len(self.symbols)} pairs loaded (LIVE BINANCE DATA)")
         except Exception as e:
-            print(f"symbols error: {e}")
-            self.symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT']
+            print(f"symbols error: {e} - using minimal fallback")
+            self.symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','MATICUSDT','AVAXUSDT','LINKUSDT']
 
     def _fetch_tickers(self):
         if not self.symbols:
             print("ticker error: no symbols loaded")
             return
         try:
-            r=requests.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=15)
+            r=self.session.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=15,proxies=self.proxies)
             data=r.json()
-            print(f"DEBUG ticker API status: {r.status_code}, type: {type(data)}")
-            if isinstance(data,dict) and 'code' in data:
-                print(f"DEBUG API error: {data.get('msg','unknown')}")
+            
+            if not isinstance(data,list):
+                print(f"ticker error: expected list, got {type(data)}")
+                return
+            
+            for t in data:
+                if not isinstance(t,dict): continue
+                s=t.get('symbol')
+                if not s or s not in self.symbols: continue
+                try:
+                    self.ticker[s]={
+                        'price':float(t.get('lastPrice',0)),
+                        'change':float(t.get('priceChangePercent',0)),
+                        'volume':float(t.get('volume',0)),
+                        'high':float(t.get('highPrice',0)),
+                        'low':float(t.get('lowPrice',0)),
+                        'quoteVolume':float(t.get('quoteVolume',0)),
+                        'openPrice':float(t.get('openPrice',0)),
+                        'count':int(t.get('count',0)),
+                    }
+                    self.prices[s]=float(t.get('lastPrice',0))
+                except (ValueError,TypeError): continue
+            print(f"✓ {len(self.ticker)} live prices loaded")
+        except Exception as e:
+            print(f"ticker error: {e}")
             if not isinstance(data, list):
                 print(f"ticker error: unexpected response type - {type(data)}")
                 # Fallback: simulated data for development
@@ -79,6 +111,14 @@ class BinanceClient:
 
     def refresh_prices(self):
         try:
+            r=self.session.get(f"{self.BASE}/fapi/v1/ticker/price",timeout=5,proxies=self.proxies)
+            for t in r.json():
+                if t['symbol'] in self.symbols:
+                    p=float(t['price'])
+                    self.prices[t['symbol']]=p
+                    if t['symbol'] in self.ticker:
+                        self.ticker[t['symbol']]['price']=p
+        except: pass
             r=requests.get(f"{self.BASE}/fapi/v1/ticker/price",timeout=5)
             for t in r.json():
                 if t['symbol'] in self.symbols:
@@ -90,16 +130,13 @@ class BinanceClient:
 
     def refresh_tickers(self):
         try:
-            r=requests.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=10)
+            r=self.session.get(f"{self.BASE}/fapi/v1/ticker/24hr",timeout=10,proxies=self.proxies)
             data=r.json()
-            if not isinstance(data, list):
-                return
+            if not isinstance(data,list): return
             for t in data:
-                if not isinstance(t, dict):
-                    continue
+                if not isinstance(t,dict): continue
                 s=t.get('symbol')
-                if not s or s not in self.symbols or s not in self.ticker:
-                    continue
+                if not s or s not in self.symbols or s not in self.ticker: continue
                 try:
                     self.ticker[s].update({
                         'price':float(t.get('lastPrice',0)),
@@ -110,25 +147,26 @@ class BinanceClient:
                         'quoteVolume':float(t.get('quoteVolume',0)),
                     })
                     self.prices[s]=float(t.get('lastPrice',0))
-                except (ValueError, TypeError):
-                    continue
+                except (ValueError,TypeError): continue
         except: pass
 
     def klines(self, symbol, interval='5m', limit=80):
         cache_key=f"{symbol}_{interval}"
         now=time.time()
-        if cache_key in self._klines_cache and now-self._cache_ts.get(cache_key,0)<25:
+        if cache_key in self._klines_cache and now-self._cache_ts.get(cache_key,0)<20:
             return self._klines_cache[cache_key]
         try:
-            r=requests.get(f"{self.BASE}/fapi/v1/klines",
-                params={'symbol':symbol,'interval':interval,'limit':limit},timeout=10)
+            r=self.session.get(f"{self.BASE}/fapi/v1/klines",
+                params={'symbol':symbol,'interval':interval,'limit':limit},
+                timeout=10,proxies=self.proxies)
             data=[{'t':k[0],'o':float(k[1]),'h':float(k[2]),
                    'l':float(k[3]),'c':float(k[4]),'v':float(k[5])}
                   for k in r.json()]
             self._klines_cache[cache_key]=data
             self._cache_ts[cache_key]=now
             return data
-        except: return self._klines_cache.get(cache_key,[])
+        except:
+            return self._klines_cache.get(cache_key,[])
 
     def price(self,s): return self.prices.get(s,0)
     def info(self,s): return self.ticker.get(s,{})
@@ -397,9 +435,9 @@ class Engine:
         self.running=False; self.log("Bot durduruldu","warn")
 
     def _bg_prices(self):
-        while self.running: self.bc.refresh_prices(); time.sleep(5)
+        while self.running: self.bc.refresh_prices(); time.sleep(2)
     def _bg_tickers(self):
-        while self.running: self.bc.refresh_tickers(); time.sleep(20)
+        while self.running: self.bc.refresh_tickers(); time.sleep(15)
 
     def state(self):
         coins={}
