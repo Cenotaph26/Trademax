@@ -151,13 +151,24 @@ class BinanceClient:
             r=self.session.get(f"{self.BASE}/fapi/v1/klines",
                 params={'symbol':symbol,'interval':interval,'limit':limit},
                 timeout=10,proxies=self.proxies)
+            
+            if r.status_code!=200:
+                print(f"Klines API error for {symbol}: status {r.status_code}")
+                return self._klines_cache.get(cache_key,[])
+            
             data=[{'t':k[0],'o':float(k[1]),'h':float(k[2]),
                    'l':float(k[3]),'c':float(k[4]),'v':float(k[5])}
                   for k in r.json()]
+            
+            if len(data)==0:
+                print(f"Klines API returned empty data for {symbol}")
+                return self._klines_cache.get(cache_key,[])
+            
             self._klines_cache[cache_key]=data
             self._cache_ts[cache_key]=now
             return data
-        except:
+        except Exception as e:
+            print(f"Klines fetch error for {symbol}: {e}")
             return self._klines_cache.get(cache_key,[])
 
     def price(self,s): return self.prices.get(s,0)
@@ -346,19 +357,24 @@ class Agent:
                 pnl=pos['sz']*pct/100
                 pos['pnl']=pnl; pos['pnl_pct']=pct
                 pos['max_pnl']=max(pos['max_pnl'],pnl); pos['min_pnl']=min(pos['min_pnl'],pnl)
-                # Her tick'te klines güncelle (cache bypass için clear)
+                # Force fresh klines every update
                 cache_key=f"{sym}_5m"
-                if cache_key in self.bc._klines_cache:
-                    self.bc._cache_ts[cache_key]=0  # Force refresh
+                self.bc._cache_ts[cache_key]=0  # Clear cache
                 new_kl=self.bc.klines(sym,'5m',50)
-                if new_kl: pos['klines']=new_kl
+                if new_kl and len(new_kl)>0:
+                    pos['klines']=new_kl
+                    if pos['ticks']%5==0:  # Log every 5 ticks
+                        print(f"Updated {sym} klines: {len(new_kl)} candles, last close: ${new_kl[-1]['c']:.6f}")
+                else:
+                    print(f"WARNING: {sym} klines fetch failed or empty")
                 if pos['type']=='LONG':
                     if p>=pos['tp']: close.append((sym,'TP'))
                     elif p<=pos['sl']: close.append((sym,'SL'))
                 else:
                     if p<=pos['tp']: close.append((sym,'TP'))
                     elif p>=pos['sl']: close.append((sym,'SL'))
-            except: pass
+            except Exception as e:
+                print(f"Position update error for {sym}: {e}")
         for sym,why in close: self.close(sym,why)
 
     def close(self,sym,why='Manual'):
