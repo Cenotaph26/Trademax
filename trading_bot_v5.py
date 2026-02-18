@@ -246,7 +246,7 @@ class Agent:
         self.risk={
             'max_positions':7,'position_size_pct':9,'leverage':0,
             'tp_pct':2.0,'sl_pct':0.8,'min_score':3,'min_conf':42,
-            'max_atr_pct':8,'scan_size':12,'scan_interval':2,
+            'max_atr_pct':8,'scan_size':20,'scan_interval':2,
             # Dinamik Exit Ayarları
             'profit_protect':True,      # Kâr koruma aktif
             'max_pnl_drawdown':0.4,     # Max PnL'den %40 geri çekilme = çık
@@ -331,6 +331,11 @@ class Agent:
                     klines=a['klines'])
 
     def _pick_strat(self):
+        # Ensure all strategies get chances - boost unused ones
+        for s in self.strategies:
+            if self.strat_trades[s]['total'] == 0:
+                self.strategies[s] = max(self.strategies[s], 1.0)  # Minimum score
+        
         t=sum(self.strategies.values()); r=random.uniform(0,t); c=0
         for s,v in self.strategies.items():
             c+=v
