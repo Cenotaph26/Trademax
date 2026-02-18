@@ -413,25 +413,40 @@ class Agent:
                         close.append((sym,f"Smart Exit: {reason}"))
                         continue
                 
-                # 2. LOSS PREVENTION - Zararda ise toparlanma sinyali var mı kontrol et
+                # 2. LOSS PREVENTION - Zarar büyümeden erken kes
                 if pnl<0 and pos['ticks']>2:
-                    should_hold=False
+                    should_exit=False
                     
+                    # SL'ye %1 kaldıysa çık (çok geç kalmadan)
+                    if sl_distance_pct<1.0:
+                        should_exit=True
+                        reason="SL cok yakin - erken zarar kes"
+                    
+                    # Zarar %1.5'i geçtiyse ve toparlanma sinyali yoksa çık
+                    if abs(pnl_pct)>1.5:
+                        a=self.analyze(sym)
+                        if a:
+                            current_score=a['score']
+                            # Toparlanma sinyali yok - çık
+                            if pos['type']=='LONG' and current_score<2:
+                                should_exit=True
+                                reason=f"Zarar buyuyor, toparlanma yok (skor:{current_score})"
+                            elif pos['type']=='SHORT' and current_score>-2:
+                                should_exit=True
+                                reason=f"Zarar buyuyor, toparlanma yok (skor:{current_score})"
+                    
+                    if should_exit:
+                        close.append((sym,f"Loss Cut: {reason}"))
+                        continue
+                    
+                    # Toparlanma sinyali varsa bekle
                     a=self.analyze(sym)
                     if a:
                         current_score=a['score']
-                        # Toparlanma sinyali (yön lehimize dönüyor)
                         if pos['type']=='LONG' and current_score>=3:
-                            should_hold=True
-                            reason=f"Toparlanma sinyali (skor:{current_score})"
+                            print(f"{sym}: Zararda ama guclu toparlanma sinyali (skor:{current_score}) - bekliyor")
                         elif pos['type']=='SHORT' and current_score<=-3:
-                            should_hold=True
-                            reason=f"Toparlanma sinyali (skor:{current_score})"
-                        
-                        # SL'ye çok yakın AMA güçlü toparlanma var
-                        if should_hold and sl_distance_pct<0.5:
-                            print(f"{sym}: SL yakin ama toparlanma sinyali - bekliyor ({reason})")
-                            continue  # SL'ye ulaşana kadar bekle
+                            print(f"{sym}: Zararda ama guclu toparlanma sinyali (skor:{current_score}) - bekliyor")
                 
                 # 3. STANDARD TP/SL CHECKS
                 if pos['type']=='LONG':
