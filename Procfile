@@ -1,1 +1,1 @@
-web: uvicorn trading_bot_v5:app --host 0.0.0.0 --port $PORT
+web: uvicorn trading_bot_v5:app
