@@ -1392,6 +1392,66 @@ class H(BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
                 kl=engine_g.bc.klines(sym,tf,limit) if engine_g else []
                 self.wfile.write(json.dumps({'klines':kl}).encode())
+            elif p.path=='/api/debug':
+                # FULL DEBUG ENDPOINT - Claude can monitor bot health
+                self.send_response(200); self.send_header('Content-type','application/json'); self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+                if not engine_g:
+                    self.wfile.write(json.dumps({'error':'Engine not initialized'}).encode())
+                    return
+                
+                debug_data={
+                    'timestamp':datetime.now().isoformat(),
+                    'uptime_seconds':int((datetime.now()-datetime.fromisoformat(engine_g.start_time)).total_seconds()) if engine_g.start_time else 0,
+                    'running':engine_g.running,
+                    'balance':engine_g.agent.balance,
+                    'start_balance':engine_g.agent.start_balance,
+                    'total_pnl':engine_g.agent.total_pnl(),
+                    'total_pnl_pct':round(engine_g.agent.total_pnl()/engine_g.agent.start_balance*100,2),
+                    'trades':engine_g.agent.trades,
+                    'wins':engine_g.agent.wins,
+                    'losses':engine_g.agent.trades-engine_g.agent.wins,
+                    'win_rate':round(engine_g.agent.wr(),2),
+                    'active_positions':len(engine_g.agent.positions),
+                    'drawdown':engine_g.agent.drawdown(),
+                    'profit_factor':engine_g.agent.profit_factor(),
+                    'peak_balance':engine_g.agent.peak_balance,
+                    'total_profit':engine_g.agent.total_profit,
+                    'total_loss':engine_g.agent.total_loss,
+                    'coin_count':len(engine_g.bc.symbols),
+                    'risk_config':engine_g.agent.risk,
+                    'positions_detail':{},
+                    'recent_trades':engine_g.agent.history[:10],
+                    'strategies':{},
+                    'recent_logs':engine_g.events[:20],
+                }
+                
+                # Position details with health indicators
+                for sym,pos in engine_g.agent.positions.items():
+                    tp_dist=abs(pos['tp']-pos['cur'])/pos['cur']*100
+                    sl_dist=abs(pos['cur']-pos['sl'])/pos['cur']*100
+                    duration_sec=int((datetime.now()-datetime.fromisoformat(pos['t0'])).total_seconds())
+                    
+                    debug_data['positions_detail'][sym]={
+                        'type':pos['type'],'entry':pos['entry'],'current':pos['cur'],
+                        'tp':pos['tp'],'sl':pos['sl'],'leverage':pos['lev'],
+                        'size':pos['sz'],'pnl':round(pos['pnl'],2),'pnl_pct':round(pos['pnl_pct'],2),
+                        'max_pnl':round(pos['max_pnl'],2),'min_pnl':round(pos['min_pnl'],2),
+                        'tp_distance_pct':round(tp_dist,2),'sl_distance_pct':round(sl_dist,2),
+                        'duration_sec':duration_sec,'ticks':pos['ticks'],
+                        'strategy':pos['strat'],'confidence':pos['conf'],'score':pos['score'],
+                        'indicators':pos['ind'],'reasons':pos['reasons'][:3],
+                    }
+                
+                # Strategy performance
+                for strat,info in engine_g.agent.strat_trades.items():
+                    wr=info['wins']/info['total']*100 if info['total']>0 else 0
+                    debug_data['strategies'][strat]={
+                        'score':round(engine_g.agent.strategies[strat],3),
+                        'trades':info['total'],'wins':info['wins'],
+                        'win_rate':round(wr,1)
+                    }
+                
+                self.wfile.write(json.dumps(debug_data).encode())
             else:
                 self.send_response(404); self.end_headers()
         except BrokenPipeError: pass
