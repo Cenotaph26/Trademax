@@ -384,30 +384,31 @@ class Agent:
                 sl_distance_pct=abs(p-pos['sl'])/p*100
                 
                 # 1. PROFIT PROTECTION - Karda ise momentum kayboldu mu kontrol et
-                if pnl>0 and pos['ticks']>3:  # En az 3 tick geçmiş olmalı
+                if pnl>0 and pos['ticks']>5:  # En az 5 tick geçmiş olmalı (önceden 3'tü)
                     should_exit=False
                     
                     # Re-analyze current market conditions
                     a=self.analyze(sym)
                     if a:
                         current_score=a['score']
-                        # LONG pozisyonda düşüş sinyali veya SHORT'ta yükseliş sinyali
-                        if pos['type']=='LONG' and current_score<=-2:
-                            should_exit=True
-                            reason=f"Momentum kaybi (skor:{current_score})"
-                        elif pos['type']=='SHORT' and current_score>=2:
-                            should_exit=True
-                            reason=f"Ters momentum (skor:{current_score})"
                         
-                        # Max PnL'den %40+ geri çekilme
-                        if pos['max_pnl']>0 and pnl<pos['max_pnl']*0.6:
+                        # Sadece GÜÇLÜ ters sinyal varsa çık (daha yüksek threshold)
+                        if pos['type']=='LONG' and current_score<=-3:  # Önceden -2
                             should_exit=True
-                            reason=f"Max PnL'den geri cekilme ({pnl:.1f}/{pos['max_pnl']:.1f})"
+                            reason=f"Guclu ters momentum (skor:{current_score})"
+                        elif pos['type']=='SHORT' and current_score>=3:  # Önceden 2
+                            should_exit=True
+                            reason=f"Guclu ters momentum (skor:{current_score})"
                         
-                        # TP'ye yakın ama momentum zayıfladı (güvenli çıkış)
-                        if tp_distance_pct<1.5 and abs(current_score)<1.5:
+                        # Max PnL'den geri çekilme threshold'ı daha yüksek
+                        if pos['max_pnl']>0 and pnl<pos['max_pnl']*0.5:  # %50 geri çekilme (önceden %40)
                             should_exit=True
-                            reason="TP yakin, momentum zayif - guvenli kar al"
+                            reason=f"Max PnL'den %50+ geri cekilme"
+                        
+                        # TP'ye çok yakınsa (<%0.5) ve momentum zayıfsa çık
+                        if tp_distance_pct<0.5 and abs(current_score)<1:
+                            should_exit=True
+                            reason="TP'ye cok yakin - guvenli kar al"
                     
                     if should_exit:
                         close.append((sym,f"Smart Exit: {reason}"))
