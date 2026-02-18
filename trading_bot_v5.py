@@ -245,8 +245,8 @@ class Agent:
         self._last_analyzed={}
         self.risk={
             'max_positions':7,'position_size_pct':9,'leverage':0,
-            'tp_pct':2.0,'sl_pct':0.8,'min_score':3,'min_conf':42,
-            'max_atr_pct':8,'scan_size':20,'scan_interval':2,
+            'tp_pct':2.0,'sl_pct':0.8,'min_score':4,'min_conf':50,
+            'max_atr_pct':6,'scan_size':20,'scan_interval':2,
             # Dinamik Exit Ayarları
             'profit_protect':True,      # Kâr koruma aktif
             'max_pnl_drawdown':0.4,     # Max PnL'den %40 geri çekilme = çık
@@ -317,12 +317,69 @@ class Agent:
         self._last_analyzed[sym]=now
         a=self.analyze(sym)
         if not a: return None
+        
+        # ENHANCED ENTRY FILTERS - Sadece güçlü sinyallere gir
+        
+        # 1. Minimum score threshold - Daha yüksek
         if a['score']>=self.risk['min_score']: action='LONG'
         elif a['score']<=-self.risk['min_score']: action='SHORT'
         else: return None
+        
+        # 2. Confidence çok düşükse REDDET
         if a['conf']<self.risk['min_conf']: return None
+        
+        # 3. Volume çok düşükse REDDET (pump-dump önleme)
+        if a['vr']<0.5:
+            print(f"{sym}: Volume cok dusuk (VR:{a['vr']:.1f}) - atla")
+            return None
+        
+        # 4. ATR çok yüksekse REDDET (volatilite riski)
+        if a['atr_pct']>self.risk['max_atr_pct']:
+            print(f"{sym}: ATR cok yuksek ({a['atr_pct']:.2f}%) - atla")
+            return None
+        
+        # 5. RSI EXTREME ZONES - Aşırı bölgede giriş yapma
+        if action=='LONG' and a['rsi']>75:
+            print(f"{sym}: RSI asiri yuksek ({a['rsi']}) - overbought, atla")
+            return None
+        if action=='SHORT' and a['rsi']<25:
+            print(f"{sym}: RSI asiri dusuk ({a['rsi']}) - oversold, atla")
+            return None
+        
+        # 6. Momentum confirmation - Birden fazla indicator onaylamalı
+        confirmations=0
+        
+        # RSI confirms trend
+        if action=='LONG' and 40<a['rsi']<70: confirmations+=1
+        if action=='SHORT' and 30<a['rsi']<60: confirmations+=1
+        
+        # MACD confirms
+        if action=='LONG' and a['macd']>0: confirmations+=1
+        if action=='SHORT' and a['macd']<0: confirmations+=1
+        
+        # Stochastic confirms
+        if action=='LONG' and a['stoch']>20: confirmations+=1
+        if action=='SHORT' and a['stoch']<80: confirmations+=1
+        
+        # Need at least 2 confirmations
+        if confirmations<2:
+            print(f"{sym}: Yetersiz onay ({confirmations}/3) - atla")
+            return None
+        
+        # 7. Fiyat Bollinger bandın ortasında mı? (çok uçlarda girme)
+        bb_mid=(a['bbu']+a['bbl'])/2
+        price_pos=(a['price']-a['bbl'])/(a['bbu']-a['bbl']) if a['bbu']>a['bbl'] else 0.5
+        
+        if action=='LONG' and price_pos>0.95:
+            print(f"{sym}: Fiyat BB ustunde ({price_pos:.0%}) - atla")
+            return None
+        if action=='SHORT' and price_pos<0.05:
+            print(f"{sym}: Fiyat BB altinda ({price_pos:.0%}) - atla")
+            return None
+        
         strat=self._pick_strat()
         lev=random.choice([2,3,5,10]) if self.risk['leverage']==0 else self.risk['leverage']
+        
         return dict(action=action,sym=sym,price=a['price'],conf=a['conf'],
                     reasons=a['reasons'],strat=strat,lev=lev,atr=a['atr'],score=a['score'],
                     ind=dict(rsi=a['rsi'],stoch=a['stoch'],macd=a['macd'],e20=a['e20'],
@@ -418,13 +475,18 @@ class Agent:
                 if pnl<0 and pos['ticks']>2:
                     should_exit=False
                     
-                    # SL'ye %1 kaldıysa çık (çok geç kalmadan)
-                    if sl_distance_pct<1.0:
+                    # KRITIK: Zarar %2'yi geçtiyse direkt çık
+                    if abs(pnl_pct)>2.0:
                         should_exit=True
-                        reason="SL cok yakin - erken zarar kes"
+                        reason=f"Zarar %2'yi gecti ({pnl_pct:.1f}%) - acil kes"
+                    
+                    # SL'ye %1.5 kaldıysa çık
+                    elif sl_distance_pct<1.5:
+                        should_exit=True
+                        reason="SL'ye cok yakin - erken kes"
                     
                     # Zarar %1.5'i geçtiyse ve toparlanma sinyali yoksa çık
-                    if abs(pnl_pct)>1.5:
+                    elif abs(pnl_pct)>1.5:
                         a=self.analyze(sym)
                         if a:
                             current_score=a['score']
@@ -439,15 +501,6 @@ class Agent:
                     if should_exit:
                         close.append((sym,f"Loss Cut: {reason}"))
                         continue
-                    
-                    # Toparlanma sinyali varsa bekle
-                    a=self.analyze(sym)
-                    if a:
-                        current_score=a['score']
-                        if pos['type']=='LONG' and current_score>=3:
-                            print(f"{sym}: Zararda ama guclu toparlanma sinyali (skor:{current_score}) - bekliyor")
-                        elif pos['type']=='SHORT' and current_score<=-3:
-                            print(f"{sym}: Zararda ama guclu toparlanma sinyali (skor:{current_score}) - bekliyor")
                 
                 # 3. STANDARD TP/SL CHECKS
                 if pos['type']=='LONG':
