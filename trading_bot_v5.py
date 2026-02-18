@@ -247,6 +247,11 @@ class Agent:
             'max_positions':7,'position_size_pct':9,'leverage':0,
             'tp_pct':2.0,'sl_pct':0.8,'min_score':3,'min_conf':42,
             'max_atr_pct':8,'scan_size':12,'scan_interval':2,
+            # Dinamik Exit Ayarları
+            'profit_protect':True,      # Kâr koruma aktif
+            'max_pnl_drawdown':0.4,     # Max PnL'den %40 geri çekilme = çık
+            'loss_recovery':True,        # Zarar toparlanma sinyali bekle
+            'smart_exit_score':-2,       # Bu skorun altında kârda çık (LONG için)
         }
 
     def analyze(self,sym):
@@ -357,24 +362,83 @@ class Agent:
                 pnl=pos['sz']*pct/100
                 pos['pnl']=pnl; pos['pnl_pct']=pct
                 pos['max_pnl']=max(pos['max_pnl'],pnl); pos['min_pnl']=min(pos['min_pnl'],pnl)
+                
                 # Force fresh klines every update
                 cache_key=f"{sym}_5m"
-                self.bc._cache_ts[cache_key]=0  # Clear cache
+                self.bc._cache_ts[cache_key]=0
                 new_kl=self.bc.klines(sym,'5m',50)
                 if new_kl and len(new_kl)>0:
                     pos['klines']=new_kl
-                    if pos['ticks']%5==0:  # Log every 5 ticks
+                    if pos['ticks']%5==0:
                         print(f"Updated {sym} klines: {len(new_kl)} candles, last close: ${new_kl[-1]['c']:.6f}")
                 else:
                     print(f"WARNING: {sym} klines fetch failed or empty")
+                
+                # DYNAMIC EXIT LOGIC - Akıllı Çıkış Sistemi
+                tp_distance_pct=abs(pos['tp']-p)/p*100
+                sl_distance_pct=abs(p-pos['sl'])/p*100
+                
+                # 1. PROFIT PROTECTION - Karda ise momentum kayboldu mu kontrol et
+                if pnl>0 and pos['ticks']>3:  # En az 3 tick geçmiş olmalı
+                    should_exit=False
+                    
+                    # Re-analyze current market conditions
+                    a=self.analyze(sym)
+                    if a:
+                        current_score=a['score']
+                        # LONG pozisyonda düşüş sinyali veya SHORT'ta yükseliş sinyali
+                        if pos['type']=='LONG' and current_score<=-2:
+                            should_exit=True
+                            reason=f"Momentum kaybi (skor:{current_score})"
+                        elif pos['type']=='SHORT' and current_score>=2:
+                            should_exit=True
+                            reason=f"Ters momentum (skor:{current_score})"
+                        
+                        # Max PnL'den %40+ geri çekilme
+                        if pos['max_pnl']>0 and pnl<pos['max_pnl']*0.6:
+                            should_exit=True
+                            reason=f"Max PnL'den geri cekilme ({pnl:.1f}/{pos['max_pnl']:.1f})"
+                        
+                        # TP'ye yakın ama momentum zayıfladı (güvenli çıkış)
+                        if tp_distance_pct<1.5 and abs(current_score)<1.5:
+                            should_exit=True
+                            reason="TP yakin, momentum zayif - guvenli kar al"
+                    
+                    if should_exit:
+                        close.append((sym,f"Smart Exit: {reason}"))
+                        continue
+                
+                # 2. LOSS PREVENTION - Zararda ise toparlanma sinyali var mı kontrol et
+                if pnl<0 and pos['ticks']>2:
+                    should_hold=False
+                    
+                    a=self.analyze(sym)
+                    if a:
+                        current_score=a['score']
+                        # Toparlanma sinyali (yön lehimize dönüyor)
+                        if pos['type']=='LONG' and current_score>=3:
+                            should_hold=True
+                            reason=f"Toparlanma sinyali (skor:{current_score})"
+                        elif pos['type']=='SHORT' and current_score<=-3:
+                            should_hold=True
+                            reason=f"Toparlanma sinyali (skor:{current_score})"
+                        
+                        # SL'ye çok yakın AMA güçlü toparlanma var
+                        if should_hold and sl_distance_pct<0.5:
+                            print(f"{sym}: SL yakin ama toparlanma sinyali - bekliyor ({reason})")
+                            continue  # SL'ye ulaşana kadar bekle
+                
+                # 3. STANDARD TP/SL CHECKS
                 if pos['type']=='LONG':
                     if p>=pos['tp']: close.append((sym,'TP'))
                     elif p<=pos['sl']: close.append((sym,'SL'))
                 else:
                     if p<=pos['tp']: close.append((sym,'TP'))
                     elif p>=pos['sl']: close.append((sym,'SL'))
+                    
             except Exception as e:
                 print(f"Position update error for {sym}: {e}")
+        
         for sym,why in close: self.close(sym,why)
 
     def close(self,sym,why='Manual'):
