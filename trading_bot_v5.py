@@ -435,15 +435,21 @@ class Agent:
     def open(self,d):
         p,lev=d['price'],d['lev']
         
-        # ── ENHANCED POSITION SIZING ──────────────────────────────
+        # CRITICAL FIX: Respect user's position size setting!
+        user_position_pct = self.risk['position_size_pct'] / 100
+        user_max_size = self.balance * user_position_pct
+        
+        print(f"🎯 {d['sym']}: User max position size: ${user_max_size:,.0f} ({self.risk['position_size_pct']}% of ${self.balance:,.0f})")
+        
+        # Calculate stop loss price
+        sl_m=self.risk['sl_pct']/100*(lev/3)
+        if d['action']=='LONG': 
+            sl_price=p*(1-sl_m)
+        else: 
+            sl_price=p*(1+sl_m)
+        
+        # ── POSITION SIZING WITH USER CAP ──────────────────────────
         if IMPROVEMENTS_ENABLED and self.risk_manager:
-            # Calculate stop loss price
-            sl_m=self.risk['sl_pct']/100*(lev/3)
-            if d['action']=='LONG': 
-                sl_price=p*(1-sl_m)
-            else: 
-                sl_price=p*(1+sl_m)
-            
             # Check portfolio constraints FIRST
             portfolio_heat = self.risk_manager.calculate_portfolio_heat()
             should_stop, stop_reason = self.risk_manager.should_stop_trading()
@@ -452,11 +458,11 @@ class Agent:
                 print(f"⚠️  {d['sym']}: Trading stopped - {stop_reason}")
                 return
             
-            if portfolio_heat > 0.08:  # 8% portfolio heat
-                print(f"⚠️  {d['sym']}: Portfolio heat too high ({portfolio_heat:.1%}) - trade atlandı")
+            if portfolio_heat > 0.08:
+                print(f"⚠️  {d['sym']}: Portfolio heat too high ({portfolio_heat:.1%})")
                 return
             
-            # Get historical performance for Kelly Criterion
+            # Calculate optimal size (Kelly or fixed)
             if len(self.all_trades) > 10:
                 recent_trades = self.all_trades[-50:]
                 winning = [t for t in recent_trades if t.pnl > 0]
@@ -466,7 +472,6 @@ class Agent:
                 avg_win = sum(t.pnl for t in winning) / len(winning) if winning else 0
                 avg_loss = abs(sum(t.pnl for t in losing) / len(losing)) if losing else 0
                 
-                # Risk-adjusted position sizing
                 position_data = self.risk_manager.calculate_position_size(
                     entry_price=p,
                     stop_loss_price=sl_price,
@@ -476,33 +481,24 @@ class Agent:
                     avg_loss=avg_loss
                 )
             else:
-                # Not enough data - use fixed risk
                 position_data = self.risk_manager.calculate_position_size(
                     entry_price=p,
                     stop_loss_price=sl_price,
                     leverage=lev
                 )
             
-            # Use risk-adjusted size
             sz = position_data['size_usd']
             
-            # SAFETY CHECK: Never exceed capital!
-            max_allowed = self.balance * 0.15  # Max 15% per trade
-            if sz > max_allowed:
-                print(f"⚠️  {d['sym']}: Position size capped: ${sz:,.0f} → ${max_allowed:,.0f}")
-                sz = max_allowed
+            # CRITICAL: Never exceed user setting!
+            if sz > user_max_size:
+                print(f"⚠️  {d['sym']}: Risk Manager suggested ${sz:,.0f}, capped to user setting ${user_max_size:,.0f}")
+                sz = user_max_size
             
-            print(f"💰 {d['sym']}: Position ${sz:,.0f} ({(sz/self.balance)*100:.1f}%) | Risk ${position_data['risk_amount']:.2f} | Method: {position_data['method']}")
+            print(f"💰 {d['sym']}: Final size ${sz:,.0f} ({(sz/self.balance)*100:.1f}%) | Risk ${position_data['risk_amount']:.2f}")
         else:
-            # Original fixed percentage sizing
-            sz = self.balance * (self.risk['position_size_pct']/100)
-            
-            # SAFETY CHECK: Cap at 15% even in basic mode
-            max_allowed = self.balance * 0.15
-            if sz > max_allowed:
-                sz = max_allowed
-            
-            print(f"💰 {d['sym']}: Position ${sz:,.0f} (basic mode, {self.risk['position_size_pct']}% of balance)")
+            # No Risk Manager - use user setting directly
+            sz = user_max_size
+            print(f"💰 {d['sym']}: Position ${sz:,.0f} ({self.risk['position_size_pct']}% - basic mode)")
         
         # Calculate TP/SL
         tp_m=self.risk['tp_pct']/100*(lev/3)
@@ -510,12 +506,19 @@ class Agent:
         if d['action']=='LONG': tp=p*(1+tp_m); sl=p*(1-sl_m)
         else: tp=p*(1-tp_m); sl=p*(1+sl_m)
         
+        # FINAL SAFETY CHECK
+        if sz > self.balance * 0.20:  # Never more than 20%
+            print(f"🛑 {d['sym']}: SAFETY ABORT - Size ${sz:,.0f} exceeds 20% of capital!")
+            return
+        
         # Open position
         self.positions[d['sym']]=dict(
             type=d['action'],entry=p,cur=p,tp=tp,sl=sl,sz=sz,lev=lev,
             pnl=0,pnl_pct=0,strat=d['strat'],reasons=d['reasons'],ind=d['ind'],
             klines=d.get('klines',[]),t0=datetime.now().isoformat(),
             conf=d['conf'],score=d['score'],max_pnl=0,min_pnl=0,ticks=0)
+        
+        print(f"✅ AÇILDI: {d['sym']} {d['action']} | Entry: ${p:.6f} | TP: ${tp:.6f} | SL: ${sl:.6f} | Size: ${sz:,.2f} | {lev}x")
         
         # Register with risk manager
         if IMPROVEMENTS_ENABLED and self.risk_manager:
@@ -551,12 +554,44 @@ class Agent:
                 else:
                     print(f"WARNING: {sym} klines fetch failed or empty")
                 
-                # DYNAMIC EXIT LOGIC - Akıllı Çıkış Sistemi
+                # ══════════════════════════════════════════════════════
+                # CRITICAL FIX: STOP LOSS MUST WORK!
+                # ══════════════════════════════════════════════════════
+                tp_hit = False
+                sl_hit = False
+                
+                if pos['type']=='LONG':
+                    # LONG: SL is below entry, TP is above
+                    if p <= pos['sl']:
+                        sl_hit = True
+                        print(f"🛑 SL HIT: {sym} LONG | Price ${p:.6f} <= SL ${pos['sl']:.6f}")
+                    elif p >= pos['tp']:
+                        tp_hit = True
+                        print(f"🎯 TP HIT: {sym} LONG | Price ${p:.6f} >= TP ${pos['tp']:.6f}")
+                else:
+                    # SHORT: SL is above entry, TP is below
+                    if p >= pos['sl']:
+                        sl_hit = True
+                        print(f"🛑 SL HIT: {sym} SHORT | Price ${p:.6f} >= SL ${pos['sl']:.6f}")
+                    elif p <= pos['tp']:
+                        tp_hit = True
+                        print(f"🎯 TP HIT: {sym} SHORT | Price ${p:.6f} <= TP ${pos['tp']:.6f}")
+                
+                # PRIORITY 1: TP/SL (highest priority - always execute)
+                if tp_hit:
+                    close.append((sym,'TP'))
+                    continue  # Skip other checks
+                
+                if sl_hit:
+                    close.append((sym,'SL'))
+                    continue  # Skip other checks
+                
+                # Calculate distances for smart exit
                 tp_distance_pct=abs(pos['tp']-p)/p*100
                 sl_distance_pct=abs(p-pos['sl'])/p*100
                 
-                # 1. PROFIT PROTECTION - Karda ise momentum kayboldu mu kontrol et
-                if pnl>0 and pos['ticks']>5:  # En az 5 tick geçmiş olmalı (önceden 3'tü)
+                # PRIORITY 2: PROFIT PROTECTION (only if no TP/SL hit)
+                if pnl>0 and pos['ticks']>5:
                     should_exit=False
                     
                     # Re-analyze current market conditions
@@ -564,20 +599,20 @@ class Agent:
                     if a:
                         current_score=a['score']
                         
-                        # Sadece GÜÇLÜ ters sinyal varsa çık (daha yüksek threshold)
-                        if pos['type']=='LONG' and current_score<=-3:  # Önceden -2
+                        # Strong reverse signal
+                        if pos['type']=='LONG' and current_score<=-3:
                             should_exit=True
                             reason=f"Guclu ters momentum (skor:{current_score})"
-                        elif pos['type']=='SHORT' and current_score>=3:  # Önceden 2
+                        elif pos['type']=='SHORT' and current_score>=3:
                             should_exit=True
                             reason=f"Guclu ters momentum (skor:{current_score})"
                         
-                        # Max PnL'den geri çekilme threshold'ı daha yüksek
-                        if pos['max_pnl']>0 and pnl<pos['max_pnl']*0.5:  # %50 geri çekilme (önceden %40)
+                        # Max PnL pullback (50% retracement)
+                        if pos['max_pnl']>0 and pnl<pos['max_pnl']*0.5:
                             should_exit=True
                             reason=f"Max PnL'den %50+ geri cekilme"
                         
-                        # TP'ye çok yakınsa (<%0.5) ve momentum zayıfsa çık
+                        # Very close to TP with weak momentum
                         if tp_distance_pct<0.5 and abs(current_score)<1:
                             should_exit=True
                             reason="TP'ye cok yakin - guvenli kar al"
@@ -586,26 +621,25 @@ class Agent:
                         close.append((sym,f"Smart Exit: {reason}"))
                         continue
                 
-                # 2. LOSS PREVENTION - Zarar büyümeden erken kes
+                # PRIORITY 3: LOSS PREVENTION (only if no TP/SL/Smart Exit)
                 if pnl<0 and pos['ticks']>2:
                     should_exit=False
                     
-                    # KRITIK: Zarar %2'yi geçtiyse direkt çık
+                    # Critical loss threshold
                     if abs(pnl_pct)>2.0:
                         should_exit=True
                         reason=f"Zarar %2'yi gecti ({pnl_pct:.1f}%) - acil kes"
                     
-                    # SL'ye %1.5 kaldıysa çık
+                    # Very close to SL
                     elif sl_distance_pct<1.5:
                         should_exit=True
                         reason="SL'ye cok yakin - erken kes"
                     
-                    # Zarar %1.5'i geçtiyse ve toparlanma sinyali yoksa çık
+                    # Loss growing without recovery signal
                     elif abs(pnl_pct)>1.5:
                         a=self.analyze(sym)
                         if a:
                             current_score=a['score']
-                            # Toparlanma sinyali yok - çık
                             if pos['type']=='LONG' and current_score<2:
                                 should_exit=True
                                 reason=f"Zarar buyuyor, toparlanma yok (skor:{current_score})"
@@ -616,14 +650,6 @@ class Agent:
                     if should_exit:
                         close.append((sym,f"Loss Cut: {reason}"))
                         continue
-                
-                # 3. STANDARD TP/SL CHECKS
-                if pos['type']=='LONG':
-                    if p>=pos['tp']: close.append((sym,'TP'))
-                    elif p<=pos['sl']: close.append((sym,'SL'))
-                else:
-                    if p<=pos['tp']: close.append((sym,'TP'))
-                    elif p>=pos['sl']: close.append((sym,'SL'))
                     
             except Exception as e:
                 print(f"Position update error for {sym}: {e}")
@@ -1788,6 +1814,7 @@ class H(BaseHTTPRequestHandler):
             p=urlparse(self.path)
             length=int(self.headers.get('Content-Length',0))
             body=json.loads(self.rfile.read(length)) if length>0 else {}
+            
             if p.path=='/api/risk':
                 if engine_g:
                     for k,v in body.items():
@@ -1796,6 +1823,64 @@ class H(BaseHTTPRequestHandler):
                     engine_g.log(f"Risk ayarlari guncellendi: {body}","success")
                 self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
                 self.wfile.write(json.dumps({'ok':True,'risk':engine_g.agent.risk if engine_g else {}}).encode())
+            
+            elif p.path=='/api/close-position':
+                # MANUEL POZİSYON KAPATMA
+                if not engine_g:
+                    self.send_response(400); self.send_header('Content-type','application/json'); self.end_headers()
+                    self.wfile.write(json.dumps({'ok':False,'error':'Engine not running'}).encode())
+                    return
+                
+                symbol = body.get('symbol')
+                if not symbol:
+                    self.send_response(400); self.send_header('Content-type','application/json'); self.end_headers()
+                    self.wfile.write(json.dumps({'ok':False,'error':'Symbol required'}).encode())
+                    return
+                
+                if symbol not in engine_g.agent.positions:
+                    self.send_response(404); self.send_header('Content-type','application/json'); self.end_headers()
+                    self.wfile.write(json.dumps({'ok':False,'error':f'{symbol} not in open positions'}).encode())
+                    return
+                
+                # Close the position
+                pos = engine_g.agent.positions[symbol]
+                engine_g.agent.close(symbol, 'Manuel Kapatma')
+                engine_g.log(f"{symbol} manuel olarak kapatildi | PnL: ${pos['pnl']:.2f}", "warn")
+                
+                self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
+                self.wfile.write(json.dumps({
+                    'ok':True,
+                    'symbol':symbol,
+                    'pnl':round(pos['pnl'],2),
+                    'message':f'{symbol} başarıyla kapatıldı'
+                }).encode())
+            
+            elif p.path=='/api/close-all':
+                # TÜM POZİSYONLARI KAPAT (EMERGENCY)
+                if not engine_g:
+                    self.send_response(400); self.send_header('Content-type','application/json'); self.end_headers()
+                    self.wfile.write(json.dumps({'ok':False,'error':'Engine not running'}).encode())
+                    return
+                
+                closed_positions = []
+                symbols_to_close = list(engine_g.agent.positions.keys())
+                
+                for symbol in symbols_to_close:
+                    pos = engine_g.agent.positions[symbol]
+                    pnl = pos['pnl']
+                    engine_g.agent.close(symbol, 'Emergency Close All')
+                    closed_positions.append({'symbol':symbol,'pnl':round(pnl,2)})
+                
+                engine_g.log(f"TÜM POZİSYONLAR KAPATILDI: {len(closed_positions)} pozisyon", "warn")
+                
+                self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
+                self.wfile.write(json.dumps({
+                    'ok':True,
+                    'count':len(closed_positions),
+                    'positions':closed_positions,
+                    'message':f'{len(closed_positions)} pozisyon kapatıldı'
+                }).encode())
+            
             else:
                 self.send_response(404); self.end_headers()
         except BrokenPipeError: pass
