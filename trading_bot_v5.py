@@ -1718,6 +1718,39 @@ class H(BaseHTTPRequestHandler):
                     debug_data['positions_detail'][sym]={
                         'type':pos['type'],'entry':pos['entry'],'current':pos['cur'],
                         'tp':pos['tp'],'sl':pos['sl'],'leverage':pos['lev'],
+            
+            # ── CANLI İZLEME API'LERİ ──────────────────────────────
+            elif p.path=='/api/live-status':
+                self.send_response(200); self.send_header('Content-type','application/json'); self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+                if 'live_analyzer' in globals() and live_analyzer:
+                    status = live_analyzer.get_current_status()
+                    self.wfile.write(json.dumps(status).encode())
+                else:
+                    self.wfile.write(json.dumps({'error':'Live monitoring not active'}).encode())
+            
+            elif p.path=='/api/live-analysis':
+                self.send_response(200); self.send_header('Content-type','application/json'); self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+                if 'live_analyzer' in globals() and live_analyzer:
+                    analysis = live_analyzer.analyze_for_claude()
+                    self.wfile.write(json.dumps(analysis).encode())
+                else:
+                    self.wfile.write(json.dumps({'error':'Live monitoring not active'}).encode())
+            
+            elif p.path=='/api/live-report':
+                self.send_response(200); self.send_header('Content-type','text/plain; charset=utf-8'); self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+                if 'live_analyzer' in globals() and live_analyzer:
+                    report = live_analyzer.get_detailed_report()
+                    self.wfile.write(report.encode('utf-8'))
+                else:
+                    self.wfile.write(b'Live monitoring not active')
+            
+            elif p.path=='/api/snapshot':
+                self.send_response(200); self.send_header('Content-type','application/json'); self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+                if 'live_analyzer' in globals() and live_analyzer:
+                    snapshot = live_analyzer.take_snapshot()
+                    self.wfile.write(json.dumps(snapshot).encode())
+                else:
+                    self.wfile.write(json.dumps({'error':'Live monitoring not active'}).encode())
                         'size':pos['sz'],'pnl':round(pos['pnl'],2),'pnl_pct':round(pos['pnl_pct'],2),
                         'max_pnl':round(pos['max_pnl'],2),'min_pnl':round(pos['min_pnl'],2),
                         'tp_distance_pct':round(tp_dist,2),'sl_distance_pct':round(sl_dist,2),
@@ -1773,12 +1806,26 @@ def main():
     PORT = int(os.environ.get('PORT', 8080))
     print("\n"+"="*52+"\n  AI TRADING BOT v5.0\n  Real Binance Data - Simulated Trading\n"+"="*52+"\n")
     engine_g=Engine()
+    
+    # ── CANLI İZLEME SİSTEMİ ──────────────────────────────────
+    try:
+        from live_bot_monitor import LiveBotAnalyzer
+        global live_analyzer
+        live_analyzer = LiveBotAnalyzer(engine_g)
+        live_analyzer.start_monitoring()
+        print("🔴 Canlı izleme aktif - Claude sizi izliyor!")
+        print("   API: /api/live-status, /api/live-analysis, /api/live-report")
+    except ImportError:
+        print("⚠️  Canlı izleme modülü bulunamadı (opsiyonel)")
+        live_analyzer = None
+    
     srv=HTTPServer(('0.0.0.0',PORT),H)
     print(f"-> Server running on port {PORT}")
     print("-> Ctrl+C ile durdur\n")
     try: srv.serve_forever()
     except KeyboardInterrupt:
         print("\nDurduruluyor...")
+        if live_analyzer: live_analyzer.stop_monitoring()
         if engine_g: engine_g.stop()
         srv.shutdown(); print("Tamam.")
 
