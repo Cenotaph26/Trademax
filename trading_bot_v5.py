@@ -1718,6 +1718,19 @@ class H(BaseHTTPRequestHandler):
                     debug_data['positions_detail'][sym]={
                         'type':pos['type'],'entry':pos['entry'],'current':pos['cur'],
                         'tp':pos['tp'],'sl':pos['sl'],'leverage':pos['lev'],
+                        'size':pos['sz'],'pnl':round(pos['pnl'],2),'pnl_pct':round(pos['pnl_pct'],2),
+                        'max_pnl':round(pos['max_pnl'],2),'min_pnl':round(pos['min_pnl'],2),
+                        'tp_distance_pct':round(tp_dist,2),'sl_distance_pct':round(sl_dist,2),
+                        'duration_seconds':duration_sec,'strategy':pos['strat']
+                    }
+                
+                # Strategy performance
+                for s,v in engine_g.agent.strategies.items():
+                    st=engine_g.agent.strat_trades[s]
+                    wr=st['wins']/st['total']*100 if st['total']>0 else 0
+                    debug_data['strategies'][s]={'score':round(v,3),'trades':st['total'],'wins':st['wins'],'wr':round(wr,1)}
+                
+                self.wfile.write(json.dumps(debug_data).encode())
             
             # ── CANLI İZLEME API'LERİ ──────────────────────────────
             elif p.path=='/api/live-status':
@@ -1751,24 +1764,6 @@ class H(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps(snapshot).encode())
                 else:
                     self.wfile.write(json.dumps({'error':'Live monitoring not active'}).encode())
-                        'size':pos['sz'],'pnl':round(pos['pnl'],2),'pnl_pct':round(pos['pnl_pct'],2),
-                        'max_pnl':round(pos['max_pnl'],2),'min_pnl':round(pos['min_pnl'],2),
-                        'tp_distance_pct':round(tp_dist,2),'sl_distance_pct':round(sl_dist,2),
-                        'duration_sec':duration_sec,'ticks':pos['ticks'],
-                        'strategy':pos['strat'],'confidence':pos['conf'],'score':pos['score'],
-                        'indicators':pos['ind'],'reasons':pos['reasons'][:3],
-                    }
-                
-                # Strategy performance
-                for strat,info in engine_g.agent.strat_trades.items():
-                    wr=info['wins']/info['total']*100 if info['total']>0 else 0
-                    debug_data['strategies'][strat]={
-                        'score':round(engine_g.agent.strategies[strat],3),
-                        'trades':info['total'],'wins':info['wins'],
-                        'win_rate':round(wr,1)
-                    }
-                
-                self.wfile.write(json.dumps(debug_data).encode())
             else:
                 self.send_response(404); self.end_headers()
         except BrokenPipeError: pass
