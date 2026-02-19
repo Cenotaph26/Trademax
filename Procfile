@@ -1,1 +1,1 @@
-web: uvicorn trading_bot_v5:app
+worker: python trading_bot_v5.py
