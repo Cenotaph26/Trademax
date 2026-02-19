@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
-"""AI Trading Bot v5.0 — Elite Dashboard"""
+"""AI Trading Bot v5.0 — Elite Dashboard - Enhanced with Risk Management"""
 
 import random, time, json, threading, requests, math, os
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+
+# ── RISK MANAGEMENT & PERFORMANCE MODULES ──────────────────
+try:
+    from trading_bot_improvements import (
+        BacktestEngine,
+        RiskManager,
+        StrategyOptimizer,
+        PerformanceMetrics,
+        Trade,
+        BacktestResult
+    )
+    IMPROVEMENTS_ENABLED = True
+    print("✅ Risk Management modülü yüklendi")
+except ImportError as e:
+    print(f"⚠️  Risk Management modülü yüklenemedi: {e}")
+    print("   Bot temel modda çalışacak. Gelişmiş özellikler devre dışı.")
+    IMPROVEMENTS_ENABLED = False
 
 # ── BINANCE CLIENT ─────────────────────────────────────────
 class BinanceClient:
@@ -253,6 +270,22 @@ class Agent:
             'loss_recovery':True,        # Zarar toparlanma sinyali bekle
             'smart_exit_score':-2,       # Bu skorun altında kârda çık (LONG için)
         }
+        
+        # ── ENHANCED RISK MANAGEMENT ──────────────────────────────
+        if IMPROVEMENTS_ENABLED:
+            self.risk_manager = RiskManager(
+                total_capital=self.balance,
+                max_risk_per_trade=0.02,      # %2 max risk per trade
+                max_portfolio_heat=0.10,       # %10 max total portfolio risk
+                max_correlation=0.7,           # Max 0.7 correlation between positions
+                max_drawdown_limit=0.20        # %20 max drawdown before stopping
+            )
+            self.all_trades = []  # Track all trades as Trade objects
+            self.performance_update_counter = 0
+            print("✅ Risk Manager başlatıldı: Max risk %2 | Portfolio heat %10 | Max DD %20")
+        else:
+            self.risk_manager = None
+            self.all_trades = []
 
     def analyze(self,sym):
         try:
@@ -401,16 +434,84 @@ class Agent:
 
     def open(self,d):
         p,lev=d['price'],d['lev']
-        sz=self.balance*(self.risk['position_size_pct']/100)
+        
+        # ── ENHANCED POSITION SIZING ──────────────────────────────
+        if IMPROVEMENTS_ENABLED and self.risk_manager:
+            # Calculate stop loss price
+            sl_m=self.risk['sl_pct']/100*(lev/3)
+            if d['action']=='LONG': 
+                sl_price=p*(1-sl_m)
+            else: 
+                sl_price=p*(1+sl_m)
+            
+            # Get historical performance for Kelly Criterion
+            if len(self.all_trades) > 10:
+                recent_trades = self.all_trades[-50:]
+                winning = [t for t in recent_trades if t.pnl > 0]
+                losing = [t for t in recent_trades if t.pnl <= 0]
+                
+                win_rate = len(winning) / len(recent_trades) if recent_trades else 0.5
+                avg_win = sum(t.pnl for t in winning) / len(winning) if winning else 0
+                avg_loss = abs(sum(t.pnl for t in losing) / len(losing)) if losing else 0
+                
+                # Risk-adjusted position sizing
+                position_data = self.risk_manager.calculate_position_size(
+                    entry_price=p,
+                    stop_loss_price=sl_price,
+                    leverage=lev,
+                    win_rate=win_rate,
+                    avg_win=avg_win,
+                    avg_loss=avg_loss
+                )
+            else:
+                # Not enough data - use fixed risk
+                position_data = self.risk_manager.calculate_position_size(
+                    entry_price=p,
+                    stop_loss_price=sl_price,
+                    leverage=lev
+                )
+            
+            # Check portfolio constraints
+            portfolio_heat = self.risk_manager.calculate_portfolio_heat()
+            should_stop, stop_reason = self.risk_manager.should_stop_trading()
+            
+            if should_stop:
+                print(f"⚠️  {d['sym']}: Trading stopped - {stop_reason}")
+                return
+            
+            if portfolio_heat > 0.08:  # 8% portfolio heat
+                print(f"⚠️  {d['sym']}: Portfolio heat too high ({portfolio_heat:.1%})")
+                return
+            
+            # Use risk-adjusted size
+            sz = position_data['size_usd']
+            print(f"📊 {d['sym']}: Position ${sz:,.0f} ({position_data['size_pct']:.1f}%) | Risk ${position_data['risk_amount']:.2f} | Method: {position_data['method']}")
+        else:
+            # Original fixed percentage sizing
+            sz=self.balance*(self.risk['position_size_pct']/100)
+        
+        # Calculate TP/SL
         tp_m=self.risk['tp_pct']/100*(lev/3)
         sl_m=self.risk['sl_pct']/100*(lev/3)
         if d['action']=='LONG': tp=p*(1+tp_m); sl=p*(1-sl_m)
         else: tp=p*(1-tp_m); sl=p*(1+sl_m)
+        
+        # Open position
         self.positions[d['sym']]=dict(
             type=d['action'],entry=p,cur=p,tp=tp,sl=sl,sz=sz,lev=lev,
             pnl=0,pnl_pct=0,strat=d['strat'],reasons=d['reasons'],ind=d['ind'],
             klines=d.get('klines',[]),t0=datetime.now().isoformat(),
             conf=d['conf'],score=d['score'],max_pnl=0,min_pnl=0,ticks=0)
+        
+        # Register with risk manager
+        if IMPROVEMENTS_ENABLED and self.risk_manager:
+            self.risk_manager.add_position(
+                symbol=d['sym'],
+                size=sz,
+                entry_price=p,
+                stop_loss=sl,
+                leverage=lev
+            )
 
     def update(self):
         close=[]
@@ -518,28 +619,85 @@ class Agent:
     def close(self,sym,why='Manual'):
         if sym not in self.positions: return
         pos=self.positions[sym]
-        self.balance+=pos['pnl']; self.peak_balance=max(self.peak_balance,self.balance)
-        self.trades+=1; won=pos['pnl']>0
-        if won: self.wins+=1; self.total_profit+=pos['pnl']
-        else: self.total_loss+=abs(pos['pnl'])
+        
+        # ── CALCULATE COSTS (Commission + Slippage) ──────────────
+        commission = pos['sz'] * pos['lev'] * 0.0004 * 2  # Entry + Exit, Binance Futures
+        slippage = pos['sz'] * 0.0005  # 0.05% average slippage
+        net_pnl = pos['pnl'] - commission - slippage
+        
+        # Update balance
+        self.balance+=net_pnl; self.peak_balance=max(self.peak_balance,self.balance)
+        self.trades+=1; won=net_pnl>0
+        if won: self.wins+=1; self.total_profit+=net_pnl
+        else: self.total_loss+=abs(net_pnl)
+        
+        # Update strategy scores
         s=pos['strat']
         self.strategies[s]=min(3.0,self.strategies[s]+(0.18 if won else -0.06))
         self.strategies[s]=max(0.1,self.strategies[s])
         st=self.strat_trades[s]; st['total']+=1
         if won: st['wins']+=1
+        
+        # Calculate duration
         delta=datetime.now()-datetime.fromisoformat(pos['t0']); secs=delta.total_seconds()
         ht=f"{int(secs)}s" if secs<60 else f"{int(secs/60)}m" if secs<3600 else f"{int(secs/3600)}h"
+        
+        # ── ENHANCED TRADE TRACKING ──────────────────────────────
+        if IMPROVEMENTS_ENABLED:
+            try:
+                # Create Trade object with full details
+                trade_obj = Trade(
+                    entry_time=datetime.fromisoformat(pos['t0']),
+                    exit_time=datetime.now(),
+                    symbol=sym,
+                    direction=pos['type'],
+                    entry_price=pos['entry'],
+                    exit_price=pos['cur'],
+                    size=pos['sz'],
+                    leverage=pos['lev'],
+                    stop_loss=pos['sl'],
+                    take_profit=pos['tp'],
+                    pnl=net_pnl,
+                    pnl_pct=(net_pnl / pos['sz']) * 100,
+                    commission=commission,
+                    slippage=slippage,
+                    mae=pos['min_pnl'],  # Maximum Adverse Excursion
+                    mfe=pos['max_pnl'],  # Maximum Favorable Excursion
+                    exit_reason=why
+                )
+                
+                self.all_trades.append(trade_obj)
+                
+                # Update risk manager
+                if self.risk_manager:
+                    self.risk_manager.remove_position(sym)
+                    self.risk_manager.total_capital = self.balance
+                    self.risk_manager.update_drawdown(self.balance)
+                
+                # Performance update every 10 trades
+                self.performance_update_counter += 1
+                if self.performance_update_counter % 10 == 0:
+                    self._print_performance_update()
+                    
+            except Exception as e:
+                print(f"⚠️  Trade tracking error: {e}")
+        
+        # Save to history
         rec=dict(id=self.trades,sym=sym,type=pos['type'],entry=pos['entry'],exit=pos['cur'],
-                 tp=pos['tp'],sl=pos['sl'],pnl=round(pos['pnl'],2),pnl_pct=round(pos['pnl_pct'],2),
+                 tp=pos['tp'],sl=pos['sl'],pnl=round(net_pnl,2),pnl_pct=round((net_pnl/pos['sz'])*100,2),
                  lev=pos['lev'],strat=pos['strat'],reasons=pos['reasons'],why=why,
                  time=datetime.now().strftime('%H:%M:%S'),ht=ht,won=won,
-                 max_pnl=round(pos['max_pnl'],2),min_pnl=round(pos['min_pnl'],2),score=pos['score'])
+                 max_pnl=round(pos['max_pnl'],2),min_pnl=round(pos['min_pnl'],2),score=pos['score'],
+                 commission=round(commission,2),slippage=round(slippage,2))
         self.history.insert(0,rec)
         if len(self.history)>200: self.history.pop()
+        
+        # Update PnL curve
         self.pnl_curve.append(round(self.balance,2)); self.pnl_times.append(datetime.now().strftime('%H:%M'))
         if len(self.pnl_curve)>100: self.pnl_curve.pop(0); self.pnl_times.pop(0)
+        
         del self.positions[sym]
-        print(f"[{'WIN' if won else 'LOSS'}] {sym} {pos['type']} | ${pos['pnl']:.2f} ({pos['pnl_pct']:.2f}%) | {why}")
+        print(f"[{'WIN' if won else 'LOSS'}] {sym} {pos['type']} | ${net_pnl:.2f} ({(net_pnl/pos['sz'])*100:.2f}%) | {why} | Costs: ${commission+slippage:.2f}")
 
     def wr(self): return (self.wins/self.trades*100) if self.trades>0 else 50.0
     def total_pnl(self): return round(self.balance-self.start_balance,2)
@@ -547,6 +705,58 @@ class Agent:
     def profit_factor(self):
         if self.total_loss==0: return 99.9 if self.total_profit>0 else 1.0
         return round(self.total_profit/self.total_loss,2)
+    
+    def _print_performance_update(self):
+        """Print detailed performance metrics every 10 trades"""
+        if not IMPROVEMENTS_ENABLED or len(self.all_trades) < 10:
+            return
+        
+        try:
+            metrics = PerformanceMetrics(self.all_trades)
+            
+            # Calculate metrics
+            sharpe = metrics.sharpe_ratio()
+            sortino = metrics.sortino_ratio()
+            exp_data = metrics.expectancy()
+            streaks = metrics.calculate_streaks()
+            
+            # Risk-adjusted metrics
+            total_return_pct = ((self.balance - self.start_balance) / self.start_balance) * 100
+            max_dd_pct = self.risk_manager.current_drawdown * 100 if self.risk_manager else self.drawdown()
+            risk_adj = metrics.risk_adjusted_metrics(total_return_pct, max_dd_pct)
+            
+            # Portfolio status
+            portfolio_heat = self.risk_manager.calculate_portfolio_heat() if self.risk_manager else 0
+            
+            print("\n" + "="*70)
+            print("📊 PERFORMANS GÜNCELLEMESİ")
+            print("="*70)
+            print(f"Toplam Trade:          {len(self.all_trades)}")
+            print(f"Sermaye:               ${self.balance:,.2f} ({total_return_pct:+.2f}%)")
+            print(f"Win Rate:              {self.wr():.1f}%")
+            print(f"Profit Factor:         {self.profit_factor():.2f}")
+            print(f"")
+            print(f"Sharpe Ratio:          {sharpe:.2f}")
+            print(f"Sortino Ratio:         {sortino:.2f}")
+            print(f"Calmar Ratio:          {risk_adj['calmar_ratio']:.2f}")
+            print(f"")
+            print(f"Expectancy:            ${exp_data['expectancy']:.2f}")
+            print(f"Expectancy Ratio:      {exp_data['expectancy_ratio']:.2f}")
+            print(f"")
+            print(f"Current Streak:        {streaks['current_streak']:+d}")
+            print(f"Max Win Streak:        {streaks['max_win_streak']}")
+            print(f"Max Loss Streak:       {streaks['max_loss_streak']}")
+            print(f"")
+            print(f"Performance Grade:     {risk_adj['grade']}")
+            print(f"Risk Score:            {risk_adj['risk_score']}/100")
+            print(f"")
+            print(f"Portfolio Heat:        {portfolio_heat:.1%}")
+            print(f"Current Drawdown:      {max_dd_pct:.2f}%")
+            print(f"Open Positions:        {len(self.positions)}/{self.risk['max_positions']}")
+            print("="*70 + "\n")
+            
+        except Exception as e:
+            print(f"⚠️  Performance update error: {e}")
 
 # ── ENGINE ─────────────────────────────────────────────────
 class Engine:
