@@ -444,6 +444,18 @@ class Agent:
             else: 
                 sl_price=p*(1+sl_m)
             
+            # Check portfolio constraints FIRST
+            portfolio_heat = self.risk_manager.calculate_portfolio_heat()
+            should_stop, stop_reason = self.risk_manager.should_stop_trading()
+            
+            if should_stop:
+                print(f"⚠️  {d['sym']}: Trading stopped - {stop_reason}")
+                return
+            
+            if portfolio_heat > 0.08:  # 8% portfolio heat
+                print(f"⚠️  {d['sym']}: Portfolio heat too high ({portfolio_heat:.1%}) - trade atlandı")
+                return
+            
             # Get historical performance for Kelly Criterion
             if len(self.all_trades) > 10:
                 recent_trades = self.all_trades[-50:]
@@ -471,24 +483,26 @@ class Agent:
                     leverage=lev
                 )
             
-            # Check portfolio constraints
-            portfolio_heat = self.risk_manager.calculate_portfolio_heat()
-            should_stop, stop_reason = self.risk_manager.should_stop_trading()
-            
-            if should_stop:
-                print(f"⚠️  {d['sym']}: Trading stopped - {stop_reason}")
-                return
-            
-            if portfolio_heat > 0.08:  # 8% portfolio heat
-                print(f"⚠️  {d['sym']}: Portfolio heat too high ({portfolio_heat:.1%})")
-                return
-            
             # Use risk-adjusted size
             sz = position_data['size_usd']
-            print(f"📊 {d['sym']}: Position ${sz:,.0f} ({position_data['size_pct']:.1f}%) | Risk ${position_data['risk_amount']:.2f} | Method: {position_data['method']}")
+            
+            # SAFETY CHECK: Never exceed capital!
+            max_allowed = self.balance * 0.15  # Max 15% per trade
+            if sz > max_allowed:
+                print(f"⚠️  {d['sym']}: Position size capped: ${sz:,.0f} → ${max_allowed:,.0f}")
+                sz = max_allowed
+            
+            print(f"💰 {d['sym']}: Position ${sz:,.0f} ({(sz/self.balance)*100:.1f}%) | Risk ${position_data['risk_amount']:.2f} | Method: {position_data['method']}")
         else:
             # Original fixed percentage sizing
-            sz=self.balance*(self.risk['position_size_pct']/100)
+            sz = self.balance * (self.risk['position_size_pct']/100)
+            
+            # SAFETY CHECK: Cap at 15% even in basic mode
+            max_allowed = self.balance * 0.15
+            if sz > max_allowed:
+                sz = max_allowed
+            
+            print(f"💰 {d['sym']}: Position ${sz:,.0f} (basic mode, {self.risk['position_size_pct']}% of balance)")
         
         # Calculate TP/SL
         tp_m=self.risk['tp_pct']/100*(lev/3)
