@@ -260,6 +260,11 @@ class Agent:
         self.strategies={'Trend Following':1.0,'Mean Reversion':1.0,'Breakout':1.0,'Scalping':1.0,'VWAP Bounce':1.0}
         self.strat_trades={s:{'wins':0,'total':0} for s in self.strategies}
         self._last_analyzed={}
+        
+        # TRADE FREQUENCY CONTROL
+        self.trades_timestamps = []  # Track last 1 hour of trades
+        self.max_trades_per_hour = 50  # HARD LIMIT
+        
         self.risk={
             'max_positions':7,'position_size_pct':9,'leverage':0,
             'tp_pct':2.0,'sl_pct':0.8,'min_score':4,'min_conf':50,
@@ -345,41 +350,78 @@ class Agent:
 
     def decide(self,sym):
         if sym in self.positions: return None
+        
+        # ═══════════════════════════════════════════════════════════
+        # CRITICAL FIX: TRADE FREQUENCY LIMIT (MAX 50/HOUR)
+        # ═══════════════════════════════════════════════════════════
         now=time.time()
-        if now-self._last_analyzed.get(sym,0)<10: return None
+        
+        # Clean old timestamps (older than 1 hour)
+        self.trades_timestamps = [t for t in self.trades_timestamps if now - t < 3600]
+        
+        # Check frequency limit
+        if len(self.trades_timestamps) >= self.max_trades_per_hour:
+            if len(self.trades_timestamps) % 10 == 0:  # Log every 10th rejection
+                print(f"⚠️  TRADE LIMIT: {len(self.trades_timestamps)}/{self.max_trades_per_hour} per hour - rejecting trades")
+            return None
+        
+        # ═══════════════════════════════════════════════════════════
+        # CRITICAL FIX: MIN TIME BETWEEN ANALYSES (60 SECONDS)
+        # ═══════════════════════════════════════════════════════════
+        if now-self._last_analyzed.get(sym,0)<60:  # 60 seconds (was 10)
+            return None
         self._last_analyzed[sym]=now
+        
         a=self.analyze(sym)
         if not a: return None
         
-        # ENHANCED ENTRY FILTERS - Sadece güçlü sinyallere gir
+        # ═══════════════════════════════════════════════════════════
+        # CRITICAL FIX: HARD-CODED FILTERS (CANNOT BE BYPASSED)
+        # ═══════════════════════════════════════════════════════════
         
-        # 1. Minimum score threshold - Daha yüksek
-        if a['score']>=self.risk['min_score']: action='LONG'
-        elif a['score']<=-self.risk['min_score']: action='SHORT'
+        # HARD MINIMUM SCORE (cannot be changed via web UI)
+        HARD_MIN_SCORE = 6  # Much stricter than default 4
+        if abs(a['score']) < HARD_MIN_SCORE:
+            return None
+        
+        # HARD MINIMUM CONFIDENCE (cannot be changed via web UI)
+        HARD_MIN_CONFIDENCE = 65  # Much stricter than default 50
+        if a['conf'] < HARD_MIN_CONFIDENCE:
+            return None
+        
+        # Determine action based on score
+        if a['score'] >= HARD_MIN_SCORE: action='LONG'
+        elif a['score'] <= -HARD_MIN_SCORE: action='SHORT'
         else: return None
         
-        # 2. Confidence çok düşükse REDDET
-        if a['conf']<self.risk['min_conf']: return None
+        # Additional web UI filters (if stricter)
+        if abs(a['score']) < self.risk['min_score']:
+            return None
         
-        # 3. Volume çok düşükse REDDET (pump-dump önleme)
+        if a['conf'] < self.risk['min_conf']:
+            return None
+        
+        # Volume check
         if a['vr']<0.5:
             print(f"{sym}: Volume cok dusuk (VR:{a['vr']:.1f}) - atla")
             return None
         
-        # 4. ATR çok yüksekse REDDET (volatilite riski)
+        # ATR check
         if a['atr_pct']>self.risk['max_atr_pct']:
             print(f"{sym}: ATR cok yuksek ({a['atr_pct']:.2f}%) - atla")
             return None
         
-        # 5. RSI EXTREME ZONES - Aşırı bölgede giriş yapma
-        if action=='LONG' and a['rsi']>75:
+        # RSI extreme zones
+        if action=='LONG' and a['rsi']>70:  # Stricter than 75
             print(f"{sym}: RSI asiri yuksek ({a['rsi']}) - overbought, atla")
             return None
-        if action=='SHORT' and a['rsi']<25:
+        if action=='SHORT' and a['rsi']<30:  # Stricter than 25
             print(f"{sym}: RSI asiri dusuk ({a['rsi']}) - oversold, atla")
             return None
         
-        # 6. Momentum confirmation - Birden fazla indicator onaylamalı
+        # ═══════════════════════════════════════════════════════════
+        # CRITICAL FIX: REQUIRE 3 CONFIRMATIONS (was 2)
+        # ═══════════════════════════════════════════════════════════
         confirmations=0
         
         # RSI confirms trend
@@ -394,12 +436,12 @@ class Agent:
         if action=='LONG' and a['stoch']>20: confirmations+=1
         if action=='SHORT' and a['stoch']<80: confirmations+=1
         
-        # Need at least 2 confirmations
-        if confirmations<2:
+        # Need at least 3 confirmations (was 2)
+        if confirmations < 3:
             print(f"{sym}: Yetersiz onay ({confirmations}/3) - atla")
             return None
         
-        # 7. Fiyat Bollinger bandın ortasında mı? (çok uçlarda girme)
+        # Bollinger band position check
         bb_mid=(a['bbu']+a['bbl'])/2
         price_pos=(a['price']-a['bbl'])/(a['bbu']-a['bbl']) if a['bbu']>a['bbl'] else 0.5
         
@@ -411,7 +453,14 @@ class Agent:
             return None
         
         strat=self._pick_strat()
-        lev=random.choice([2,3,5,10]) if self.risk['leverage']==0 else self.risk['leverage']
+        
+        # ═══════════════════════════════════════════════════════════
+        # CRITICAL FIX: LEVERAGE FIXED AT 3X (NO RANDOM)
+        # ═══════════════════════════════════════════════════════════
+        lev = 3  # ALWAYS 3x (no random, no user override)
+        
+        # Record this trade attempt
+        self.trades_timestamps.append(now)
         
         return dict(action=action,sym=sym,price=a['price'],conf=a['conf'],
                     reasons=a['reasons'],strat=strat,lev=lev,atr=a['atr'],score=a['score'],
@@ -535,11 +584,28 @@ class Agent:
         for sym,pos in self.positions.items():
             try:
                 p=self.bc.price(sym)
-                if p==0: continue
+                if p==0: 
+                    print(f"⚠️  {sym}: Price is 0, skipping update")
+                    continue
+                
+                # SAFETY CHECK: Position size must be > 0
+                if pos['sz'] <= 0:
+                    print(f"🛑 {sym}: INVALID POSITION - Size is 0! Closing...")
+                    close.append((sym, 'Invalid Position Size'))
+                    continue
+                
                 pos['cur']=p; pos['ticks']+=1; m=pos['lev']
-                if pos['type']=='LONG': pct=(p-pos['entry'])/pos['entry']*100*m
-                else: pct=(pos['entry']-p)/pos['entry']*100*m
-                pnl=pos['sz']*pct/100
+                
+                # Calculate PnL with safety check
+                try:
+                    if pos['type']=='LONG': pct=(p-pos['entry'])/pos['entry']*100*m
+                    else: pct=(pos['entry']-p)/pos['entry']*100*m
+                    pnl=pos['sz']*pct/100
+                except ZeroDivisionError:
+                    print(f"⚠️  {sym}: Division by zero in PnL calculation")
+                    pct = 0
+                    pnl = 0
+                
                 pos['pnl']=pnl; pos['pnl_pct']=pct
                 pos['max_pnl']=max(pos['max_pnl'],pnl); pos['min_pnl']=min(pos['min_pnl'],pnl)
                 
@@ -660,10 +726,22 @@ class Agent:
         if sym not in self.positions: return
         pos=self.positions[sym]
         
+        # SAFETY CHECK: Validate position data
+        if pos['sz'] <= 0:
+            print(f"🛑 {sym}: Cannot close - invalid position size {pos['sz']}")
+            del self.positions[sym]
+            return
+        
         # ── CALCULATE COSTS (Commission + Slippage) ──────────────
-        commission = pos['sz'] * pos['lev'] * 0.0004 * 2  # Entry + Exit, Binance Futures
-        slippage = pos['sz'] * 0.0005  # 0.05% average slippage
-        net_pnl = pos['pnl'] - commission - slippage
+        try:
+            commission = pos['sz'] * pos['lev'] * 0.0004 * 2  # Entry + Exit, Binance Futures
+            slippage = pos['sz'] * 0.0005  # 0.05% average slippage
+            net_pnl = pos['pnl'] - commission - slippage
+        except (TypeError, ZeroDivisionError) as e:
+            print(f"⚠️  {sym}: Error calculating costs: {e}")
+            commission = 0
+            slippage = 0
+            net_pnl = pos['pnl']
         
         # Update balance
         self.balance+=net_pnl; self.peak_balance=max(self.peak_balance,self.balance)
@@ -698,7 +776,7 @@ class Agent:
                     stop_loss=pos['sl'],
                     take_profit=pos['tp'],
                     pnl=net_pnl,
-                    pnl_pct=(net_pnl / pos['sz']) * 100,
+                    pnl_pct=(net_pnl / pos['sz']) * 100 if pos['sz'] > 0 else 0,
                     commission=commission,
                     slippage=slippage,
                     mae=pos['min_pnl'],  # Maximum Adverse Excursion
@@ -722,9 +800,12 @@ class Agent:
             except Exception as e:
                 print(f"⚠️  Trade tracking error: {e}")
         
+        # Calculate safe pnl_pct for history
+        safe_pnl_pct = (net_pnl / pos['sz']) * 100 if pos['sz'] > 0 else 0
+        
         # Save to history
         rec=dict(id=self.trades,sym=sym,type=pos['type'],entry=pos['entry'],exit=pos['cur'],
-                 tp=pos['tp'],sl=pos['sl'],pnl=round(net_pnl,2),pnl_pct=round((net_pnl/pos['sz'])*100,2),
+                 tp=pos['tp'],sl=pos['sl'],pnl=round(net_pnl,2),pnl_pct=round(safe_pnl_pct,2),
                  lev=pos['lev'],strat=pos['strat'],reasons=pos['reasons'],why=why,
                  time=datetime.now().strftime('%H:%M:%S'),ht=ht,won=won,
                  max_pnl=round(pos['max_pnl'],2),min_pnl=round(pos['min_pnl'],2),score=pos['score'],
@@ -737,14 +818,21 @@ class Agent:
         if len(self.pnl_curve)>100: self.pnl_curve.pop(0); self.pnl_times.pop(0)
         
         del self.positions[sym]
-        print(f"[{'WIN' if won else 'LOSS'}] {sym} {pos['type']} | ${net_pnl:.2f} ({(net_pnl/pos['sz'])*100:.2f}%) | {why} | Costs: ${commission+slippage:.2f}")
+        print(f"[{'WIN' if won else 'LOSS'}] {sym} {pos['type']} | ${net_pnl:.2f} ({safe_pnl_pct:.2f}%) | {why} | Costs: ${commission+slippage:.2f}")
 
-    def wr(self): return (self.wins/self.trades*100) if self.trades>0 else 50.0
-    def total_pnl(self): return round(self.balance-self.start_balance,2)
-    def drawdown(self): return round((self.peak_balance-self.balance)/self.peak_balance*100,2) if self.peak_balance>0 else 0
+    def wr(self): 
+        return (self.wins/self.trades*100) if self.trades>0 else 50.0
+    
+    def total_pnl(self): 
+        return round(self.balance-self.start_balance,2)
+    
+    def drawdown(self): 
+        return round((self.peak_balance-self.balance)/self.peak_balance*100,2) if self.peak_balance>0 else 0
+    
     def profit_factor(self):
-        if self.total_loss==0: return 99.9 if self.total_profit>0 else 1.0
-        return round(self.total_profit/self.total_loss,2)
+        if self.total_loss==0: 
+            return 99.9 if self.total_profit>0 else 1.0
+        return round(self.total_profit/self.total_loss,2) if self.total_loss > 0 else 1.0
     
     def _print_performance_update(self):
         """Print detailed performance metrics every 10 trades"""
