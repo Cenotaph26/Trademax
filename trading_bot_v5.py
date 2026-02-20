@@ -267,8 +267,8 @@ class Agent:
         
         self.risk={
             'max_positions':7,'position_size_pct':9,'leverage':0,
-            'tp_pct':2.0,'sl_pct':0.8,'min_score':4,'min_conf':50,
-            'max_atr_pct':6,'scan_size':20,'scan_interval':2,
+            'tp_pct':2.5,'sl_pct':1.2,'min_score':4,'min_conf':50,
+            'max_atr_pct':6,'scan_size':30,'scan_interval':1,  # scan_interval: 2→1, scan_size: 20→30
             # Dinamik Exit Ayarları
             'profit_protect':True,      # Kâr koruma aktif
             'max_pnl_drawdown':0.4,     # Max PnL'den %40 geri çekilme = çık
@@ -352,23 +352,23 @@ class Agent:
         if sym in self.positions: return None
         
         # ═══════════════════════════════════════════════════════════
-        # CRITICAL FIX: TRADE FREQUENCY LIMIT (MAX 50/HOUR)
+        # TRADE FREQUENCY LIMIT (MAX 100/HOUR - INCREASED)
         # ═══════════════════════════════════════════════════════════
         now=time.time()
         
         # Clean old timestamps (older than 1 hour)
         self.trades_timestamps = [t for t in self.trades_timestamps if now - t < 3600]
         
-        # Check frequency limit
-        if len(self.trades_timestamps) >= self.max_trades_per_hour:
-            if len(self.trades_timestamps) % 10 == 0:  # Log every 10th rejection
-                print(f"⚠️  TRADE LIMIT: {len(self.trades_timestamps)}/{self.max_trades_per_hour} per hour - rejecting trades")
+        # Check frequency limit (increased to 100)
+        if len(self.trades_timestamps) >= 100:  # Was 50
+            if len(self.trades_timestamps) % 10 == 0:
+                print(f"⚠️  TRADE LIMIT: {len(self.trades_timestamps)}/100 per hour - rejecting trades")
             return None
         
         # ═══════════════════════════════════════════════════════════
-        # CRITICAL FIX: MIN TIME BETWEEN ANALYSES (60 SECONDS)
+        # MIN TIME BETWEEN ANALYSES (REDUCED TO 20 SECONDS)
         # ═══════════════════════════════════════════════════════════
-        if now-self._last_analyzed.get(sym,0)<60:  # 60 seconds (was 10)
+        if now-self._last_analyzed.get(sym,0)<20:  # Was 60, now 20
             return None
         self._last_analyzed[sym]=now
         
@@ -376,16 +376,16 @@ class Agent:
         if not a: return None
         
         # ═══════════════════════════════════════════════════════════
-        # CRITICAL FIX: HARD-CODED FILTERS (CANNOT BE BYPASSED)
+        # RELAXED HARD-CODED FILTERS (MORE TRADES)
         # ═══════════════════════════════════════════════════════════
         
-        # HARD MINIMUM SCORE (cannot be changed via web UI)
-        HARD_MIN_SCORE = 6  # Much stricter than default 4
+        # HARD MINIMUM SCORE (relaxed from 6 to 5)
+        HARD_MIN_SCORE = 5  # Was 6
         if abs(a['score']) < HARD_MIN_SCORE:
             return None
         
-        # HARD MINIMUM CONFIDENCE (cannot be changed via web UI)
-        HARD_MIN_CONFIDENCE = 65  # Much stricter than default 50
+        # HARD MINIMUM CONFIDENCE (relaxed from 65 to 60)
+        HARD_MIN_CONFIDENCE = 60  # Was 65
         if a['conf'] < HARD_MIN_CONFIDENCE:
             return None
         
@@ -411,22 +411,22 @@ class Agent:
             print(f"{sym}: ATR cok yuksek ({a['atr_pct']:.2f}%) - atla")
             return None
         
-        # RSI extreme zones
-        if action=='LONG' and a['rsi']>70:  # Stricter than 75
+        # RSI extreme zones (relaxed)
+        if action=='LONG' and a['rsi']>75:  # Was 70
             print(f"{sym}: RSI asiri yuksek ({a['rsi']}) - overbought, atla")
             return None
-        if action=='SHORT' and a['rsi']<30:  # Stricter than 25
+        if action=='SHORT' and a['rsi']<25:  # Was 30
             print(f"{sym}: RSI asiri dusuk ({a['rsi']}) - oversold, atla")
             return None
         
         # ═══════════════════════════════════════════════════════════
-        # CRITICAL FIX: REQUIRE 3 CONFIRMATIONS (was 2)
+        # RELAXED: REQUIRE 2 CONFIRMATIONS (was 3)
         # ═══════════════════════════════════════════════════════════
         confirmations=0
         
         # RSI confirms trend
-        if action=='LONG' and 40<a['rsi']<70: confirmations+=1
-        if action=='SHORT' and 30<a['rsi']<60: confirmations+=1
+        if action=='LONG' and 40<a['rsi']<75: confirmations+=1  # Wider range
+        if action=='SHORT' and 25<a['rsi']<60: confirmations+=1  # Wider range
         
         # MACD confirms
         if action=='LONG' and a['macd']>0: confirmations+=1
@@ -436,9 +436,9 @@ class Agent:
         if action=='LONG' and a['stoch']>20: confirmations+=1
         if action=='SHORT' and a['stoch']<80: confirmations+=1
         
-        # Need at least 3 confirmations (was 2)
-        if confirmations < 3:
-            print(f"{sym}: Yetersiz onay ({confirmations}/3) - atla")
+        # Need at least 2 confirmations (was 3)
+        if confirmations < 2:  # Reduced from 3
+            print(f"{sym}: Yetersiz onay ({confirmations}/2) - atla")
             return None
         
         # Bollinger band position check
@@ -455,12 +455,14 @@ class Agent:
         strat=self._pick_strat()
         
         # ═══════════════════════════════════════════════════════════
-        # CRITICAL FIX: LEVERAGE FIXED AT 3X (NO RANDOM)
+        # LEVERAGE FIXED AT 3X
         # ═══════════════════════════════════════════════════════════
-        lev = 3  # ALWAYS 3x (no random, no user override)
+        lev = 3  # ALWAYS 3x
         
         # Record this trade attempt
         self.trades_timestamps.append(now)
+        
+        print(f"✅ TRADE APPROVED: {sym} {action} | Score:{a['score']} | Conf:{a['conf']:.0f}% | RSI:{a['rsi']:.0f} | Confirmations:{confirmations}")
         
         return dict(action=action,sym=sym,price=a['price'],conf=a['conf'],
                     reasons=a['reasons'],strat=strat,lev=lev,atr=a['atr'],score=a['score'],
